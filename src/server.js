@@ -12,6 +12,9 @@ const webhookRouter = require('./routes/webhooks');
 // 👇 FALTA ESTO
 const historyRoutes = require('./routes/history');
 
+const profileRoutes = require('./routes/profile');
+
+
 const app = express();
 
 // CORS
@@ -35,6 +38,9 @@ app.use('/api/dispense', dispenseRoutes);
 
 // 👇 MONTA EL HISTORIAL EN /api  => endpoint final: GET /api/history
 app.use('/api', historyRoutes);
+
+app.use('/api/profile', profileRoutes);
+
 
 app.use('/ops', opsRoutes); // protegido con x-admin-token
 
