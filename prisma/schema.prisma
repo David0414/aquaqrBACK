@@ -118,3 +118,5 @@ model Dispense {
 
   @@index([userId, createdAt])
 }
+
+
