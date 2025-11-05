@@ -1,19 +1,21 @@
-// server.js
+// src/server.js
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
-const walletRoutes = require('./routes/wallet');
+// Rutas
+const walletRoutes   = require('./routes/wallet');
 const rechargeRoutes = require('./routes/recharge');
 const dispenseRoutes = require('./routes/dispense');
-const opsRoutes = require('./routes/ops');
-const webhookRouter = require('./routes/webhooks');
+const opsRoutes      = require('./routes/ops');
+const webhookRouter  = require('./routes/webhooks');
 
-// 👇 FALTA ESTO
-const historyRoutes = require('./routes/history');
+// ✅ CORREGIDO: server.js ya está dentro de src/, así que no va './src/...'
+const qrRoutes       = require('./routes/qr');
 
-const profileRoutes = require('./routes/profile');
-
+// (si ya existen en tu repo)
+const historyRoutes  = require('./routes/history');
+const profileRoutes  = require('./routes/profile');
 
 const app = express();
 
@@ -23,26 +25,35 @@ app.use(cors({
   credentials: true,
 }));
 
-// 1) WEBHOOKS con RAW
+// 1) WEBHOOKS con RAW (antes de express.json)
 app.use('/webhooks', express.raw({ type: 'application/json' }), webhookRouter);
 
 // 2) Resto con JSON
 app.use(express.json());
 
+// Healthcheck
 app.get('/api/health', (_, res) => res.json({ ok: true }));
 
-// Rutas API
+// ---------- Rutas API ----------
+app.use('/api/qr', qrRoutes);
+
+// ✅ Usa `use` para montar el router bajo /m
+//    Si tu router de QR expone router.get('/') como “redirector público”,
+//    entonces GET /m?m=...&sig=... caerá aquí y redirigirá al FRONT.
+app.use('/m', qrRoutes);
+
 app.use('/api', walletRoutes);
 app.use('/api/recharge', rechargeRoutes);
 app.use('/api/dispense', dispenseRoutes);
 
-// 👇 MONTA EL HISTORIAL EN /api  => endpoint final: GET /api/history
+// Historial (ej: GET /api/history)
 app.use('/api', historyRoutes);
 
+// Perfil de usuario
 app.use('/api/profile', profileRoutes);
 
-
-app.use('/ops', opsRoutes); // protegido con x-admin-token
+// Rutas de operaciones (protegidas con x-admin-token)
+app.use('/ops', opsRoutes);
 
 // 404
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
