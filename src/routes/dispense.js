@@ -4,6 +4,7 @@ const router = express.Router();
 
 const { prisma } = require('../db');           // 👈 usa el singleton SIEMPRE
 const { requireAuth } = require('../utils/auth');
+const { sendUserNotification } = require('../utils/notifications');
 
 /* ----------------------------------------------------------------------------- */
 /* Config desde .env                                                             */
@@ -16,7 +17,7 @@ function intFromEnv(name, fallback) {
 
 const CURRENCY = (process.env.CURRENCY || 'mxn').toUpperCase();
 
-const GARRAFON_LITERS = intFromEnv('GARRAFON_LITERS', 20);                  // 20 L
+const GARRAFON_LITERS = intFromEnv('GARRAFON_LITERS', 20);                     // 20 L
 const PRICE_PER_GARRAFON_CENTS = intFromEnv('PRICE_PER_GARRAFON_CENTS', 3500); // $35.00
 const ENV_PPL = intFromEnv('PRICE_PER_LITER_CENTS', NaN);
 
@@ -27,10 +28,12 @@ const PRICE_PER_LITER_CENTS = Number.isFinite(ENV_PPL)
 
 // Opciones de litros: 1/4, 1/2 y completo.
 const LITERS_QUARTER = Math.round((GARRAFON_LITERS / 4) * 10) / 10; // ej. 5.0
-const LITERS_HALF = Math.round((GARRAFON_LITERS / 2) * 10) / 10; // ej. 10.0
-const LITERS_FULL = GARRAFON_LITERS;                             // ej. 20
+const LITERS_HALF = Math.round((GARRAFON_LITERS / 2) * 10) / 10;    // ej. 10.0
+const LITERS_FULL = GARRAFON_LITERS;                                // ej. 20
 const ALLOWED_LITERS = new Set([LITERS_QUARTER, LITERS_HALF, LITERS_FULL]);
 
+/* ----------------------------------------------------------------------------- */
+/* Utils                                                                         */
 /* ----------------------------------------------------------------------------- */
 async function ensureUserAndWallet(userId) {
   // Crea User/Wallet si no existen (id = userId de Clerk, está bien que no sea cuid)
@@ -52,12 +55,27 @@ function totalForLiters(ltrs) {
   return Math.round(ltrs * PRICE_PER_LITER_CENTS);
 }
 
+function mapDispenseStatus(s) {
+  switch (s) {
+    case 'STARTED':
+      return 'pending';
+    case 'FAILED':
+      return 'failed';
+    case 'CANCELED':
+      return 'cancelled';
+    case 'COMPLETED':
+    default:
+      return 'completed';
+  }
+}
+
 /* ----------------------------------------------------------------------------- */
 /* POST /api/dispense                                                            */
 /* Body: { liters:number, machineId?:string, location?:string }                  */
-/* - Valida litros (¼, ½ o completo)                                            */
+/* - Valida litros (¼, ½ o completo)                                             */
 /* - Calcula totalCents y pricePerLiterCents                                     */
 /* - Verifica saldo, descuenta Wallet, crea Ledger (DEBIT) y crea Dispense       */
+/* - Envía notificación por correo (si el usuario la tiene activada)            */
 /* Respuesta: { ok, liters, totalCents, pricePerLiterCents, currency, newBalanceCents } */
 /* ----------------------------------------------------------------------------- */
 router.post('/', requireAuth, async (req, res) => {
@@ -74,7 +92,7 @@ router.post('/', requireAuth, async (req, res) => {
     }
 
     const pricePerLiterCents = PRICE_PER_LITER_CENTS;
-    const totalCents = totalForLiters(ltrs); // 👈 coincide con tu schema
+    const totalCents = totalForLiters(ltrs);
 
     await ensureUserAndWallet(userId);
     const wallet = await prisma.wallet.findUnique({ where: { userId } });
@@ -104,59 +122,65 @@ router.post('/', requireAuth, async (req, res) => {
           amountCents: totalCents,
           currency: CURRENCY,
           description: `Dispensado de agua • ${ltrs}L`,
-          source: `DISPENSE${machineId ? `:${machineId}` : ''}${location ? `@${location}` : ''}`,
+          source: `DISPENSE${machineId ? `:${machineId}` : ''}${
+            location ? `@${location}` : ''
+          }`,
           status: 'POSTED',
         },
       });
 
       // 3) Registro en DISPENSE (lo que usa /api/history)
-      await tx.dispense.create({
+      const dispense = await tx.dispense.create({
         data: {
           userId,
           liters: ltrs,
-          pricePerLiterCents,         // 👈 requerido por tu schema
-          totalCents,                 // 👈 requerido por tu schema
+          pricePerLiterCents,
+          totalCents,
           currency: CURRENCY,
-          status: 'COMPLETED',        // mapDispenseStatus lo traducirá a "completed"
+          status: 'COMPLETED',
           machineId: machineId || null,
           machineLocation: location || null,
-          // Si agregas relación en schema: ledgerEntryId: ledger.id,
         },
       });
 
-      return { newBalanceCents: w.balanceCents, ledgerId: ledger.id };
+      return {
+        newBalanceCents: w.balanceCents,
+        ledgerId: ledger.id,
+        dispense,
+      };
     });
+
+    // 👉 Notificación por correo (usa la nueva firma del helper)
+    try {
+      await sendUserNotification(userId, {
+        type: 'dispense',          // 👈 este es el tipo que maneja notifications.js
+        amountCents: totalCents,   // se convierte a monto dentro del helper
+        liters: ltrs,              // para incluir los litros en el correo
+      });
+    } catch (errNotif) {
+      console.error('[Dispense] Error enviando notificación', errNotif);
+    }
 
     return res.json({
       ok: true,
       liters: ltrs,
-      pricePerLiterCents: pricePerLiterCents,
+      pricePerLiterCents,
       totalCents,
       currency: CURRENCY,
       newBalanceCents: result.newBalanceCents,
     });
   } catch (e) {
     console.error('POST /api/dispense error', e);
-    return res.status(500).json({ error: 'No se pudo registrar el dispensado' });
+    return res
+      .status(500)
+      .json({ error: 'No se pudo registrar el dispensado' });
   }
 });
 
-
-// 👇 Añadir en src/routes/dispense.js
-function mapDispenseStatus(s) {
-  switch (s) {
-    case 'COMPLETED': return 'completed';
-    case 'STARTED': return 'pending';
-    case 'FAILED': return 'failed';
-    case 'CANCELED': return 'cancelled';
-    default: return 'completed';
-  }
-}
-
-/* -----------------------------------------------------------------------------
- * GET /api/dispense/history?limit=20&cursor=<id>
- * Devuelve historial desde la tabla Dispense (la misma que llenas en POST /api/dispense)
- * ---------------------------------------------------------------------------*/
+/* ----------------------------------------------------------------------------- */
+/* GET /api/dispense/history?limit=20&cursor=<id>                                */
+/* Devuelve historial desde la tabla Dispense (la misma que llenas en POST)     */
+/* ----------------------------------------------------------------------------- */
 router.get('/history', requireAuth, async (req, res) => {
   try {
     const { userId } = req.auth;
@@ -173,11 +197,11 @@ router.get('/history', requireAuth, async (req, res) => {
     const hasMore = rows.length > limit;
     const page = rows.slice(0, limit);
 
-    const items = page.map(d => ({
+    const items = page.map((d) => ({
       id: d.id,
       type: 'dispensing',
       description: d.description || `Dispensado de agua • ${d.liters}L`,
-      amount: (d.totalCents || 0) / 100,                 // tu schema usa totalCents
+      amount: (d.totalCents || 0) / 100,
       currency: (d.currency || 'MXN').toUpperCase(),
       date: d.createdAt,
       status: mapDispenseStatus(d.status),
@@ -193,10 +217,11 @@ router.get('/history', requireAuth, async (req, res) => {
     });
   } catch (e) {
     console.error('GET /api/dispense/history error', e);
-    res.status(500).json({ error: 'No se pudo obtener el historial de dispensados' });
+    res
+      .status(500)
+      .json({ error: 'No se pudo obtener el historial de dispensados' });
   }
 });
-
 
 /* ----------------------------------------------------------------------------- */
 /* GET /api/dispense/config (pública)                                            */

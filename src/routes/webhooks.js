@@ -2,9 +2,10 @@
 const express = require('express');
 const router = express.Router();
 const Stripe = require('stripe');
-const { PrismaClient } = require('@prisma/client');
 
-const prisma = new PrismaClient();
+const { prisma } = require('../db'); // usa el singleton
+const { sendUserNotification } = require('../utils/notifications');
+
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: '2024-06-20',
 });
@@ -14,6 +15,7 @@ async function alreadyHandled(eventId) {
   const existing = await prisma.webhookEvent.findUnique({ where: { eventId } });
   return !!existing;
 }
+
 async function markHandled(provider, eventId) {
   await prisma.webhookEvent.create({ data: { provider, eventId } });
 }
@@ -89,11 +91,28 @@ router.post('/stripe', async (req, res) => {
       console.log('[Webhook] will credit', { userId, amountCents, providerPaymentId });
 
       if (userId) {
+        // Acredita saldo + ledger
         await creditWalletAndCloseRecharge({
           userId,
           amountCents,
           currency,
           providerPaymentId,
+        });
+
+        // 👇 Enviar correo de confirmación de recarga
+        const amountFormatted = (amountCents / 100).toFixed(2);
+
+        await sendUserNotification({
+          userId,
+          type: 'recharge',
+          subject: 'Tu recarga en AquaQR se acreditó correctamente',
+          text: `Hola 👋\n\nTu recarga de $${amountFormatted} MXN se acreditó correctamente en tu saldo de AquaQR.\n\nGracias por usar AquaQR 💧`,
+          html: `
+            <p>Hola 👋</p>
+            <p>Tu recarga de <strong>$${amountFormatted} MXN</strong> se acreditó correctamente en tu saldo de <strong>AquaQR</strong>.</p>
+            <p>Ya puedes usar tu saldo para dispensar agua en cualquier máquina compatible 💧</p>
+            <p>Gracias por usar AquaQR.</p>
+          `,
         });
       } else {
         console.warn('⚠️  No se pudo resolver userId para', providerPaymentId);

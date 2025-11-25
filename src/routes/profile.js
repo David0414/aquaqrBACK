@@ -1,10 +1,14 @@
+// src/routes/profile.js
 const express = require('express');
 const router = express.Router();
 
 const { prisma } = require('../db');      // usa el singleton
 const { requireAuth } = require('../utils/auth');
 
-// GET /api/profile -> { phone }
+/**
+ * GET /api/profile
+ * Devuelve los datos básicos del usuario: { email, name, phone }
+ */
 router.get('/', requireAuth, async (req, res) => {
   try {
     const { userId } = req.auth;
@@ -14,39 +18,78 @@ router.get('/', requireAuth, async (req, res) => {
       where: { id: userId },
       update: {},
       create: { id: userId },
-      select: { phone: true },
+      select: {
+        email: true,
+        name: true,
+        phone: true,
+      },
     });
 
-    res.json({ phone: user.phone || '' });
+    res.json({
+      email: user.email || '',
+      name: user.name || '',
+      phone: user.phone || '',
+    });
   } catch (e) {
     console.error('GET /api/profile error', e);
     res.status(500).json({ error: 'No se pudo obtener el perfil' });
   }
 });
 
-// PUT /api/profile { phone }
-// - Si phone es "", se guarda como null (opcional).
+/**
+ * PUT /api/profile
+ * Body: { email?: string, name?: string, phone?: string }
+ * - Si un campo viene como "", se guarda como null.
+ */
 router.put('/', requireAuth, async (req, res) => {
   try {
     const { userId } = req.auth;
-    const raw = String(req.body?.phone ?? '').trim();
+    const body = req.body || {};
 
-    let phone = null;
-    if (raw.length > 0) {
-      // Validación sencilla; ajusta el patrón si lo deseas
-      if (!/^\+?[\d\s\-()]{10,}$/.test(raw)) {
-        return res.status(400).json({ error: 'Teléfono inválido' });
+    const rawEmail = typeof body.email === 'string' ? body.email.trim() : '';
+    const rawName = typeof body.name === 'string' ? body.name.trim() : '';
+    const rawPhone = typeof body.phone === 'string' ? body.phone.trim() : '';
+
+    let email = null;
+    if (rawEmail.length > 0) {
+      // Validación sencilla de email
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(rawEmail)) {
+        return res.status(400).json({ error: 'Correo inválido' });
       }
-      phone = raw;
+      email = rawEmail.toLowerCase();
     }
 
-    await prisma.user.upsert({
+    let phone = null;
+    if (rawPhone.length > 0) {
+      // Validación sencilla; ajusta el patrón si lo deseas
+      if (!/^\+?[\d\s\-()]{7,}$/.test(rawPhone)) {
+        return res.status(400).json({ error: 'Teléfono inválido' });
+      }
+      phone = rawPhone;
+    }
+
+    const name = rawName.length > 0 ? rawName : null;
+
+    const user = await prisma.user.upsert({
       where: { id: userId },
-      update: { phone },
-      create: { id: userId, phone },
+      update: { email, name, phone },
+      create: { id: userId, email, name, phone },
+      select: {
+        email: true,
+        name: true,
+        phone: true,
+      },
     });
 
-    res.json({ ok: true });
+    res.json({
+      ok: true,
+      user: {
+        email: user.email || '',
+        name: user.name || '',
+        phone: user.phone || '',
+      },
+    });
   } catch (e) {
     console.error('PUT /api/profile error', e);
     res.status(500).json({ error: 'No se pudo actualizar el perfil' });

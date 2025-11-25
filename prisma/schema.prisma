@@ -1,7 +1,6 @@
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")        // Pooler 6543 -> runtime API
-  directUrl = env("DIRECT_DATABASE_URL") // Directa 5432 -> migraciones/Studio
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 generator client {
@@ -43,16 +42,15 @@ model User {
   clerkId   String?  @unique
   email     String?
   name      String?
-
-  // 👉 NUEVO: teléfono opcional
   phone     String?
-
   createdAt DateTime @default(now())
 
   wallet     Wallet?
   recharges  Recharge[]
   ledger     LedgerEntry[]
   dispenses  Dispense[]
+
+  notificationSettings NotificationSettings?
 }
 
 model Wallet {
@@ -119,4 +117,19 @@ model Dispense {
   @@index([userId, createdAt])
 }
 
+model NotificationSettings {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id])
 
+  transactionConfirmations Boolean @default(true)
+  promotionalOffers        Boolean @default(true)
+  securityAlerts           Boolean @default(true)
+  maintenanceNotices       Boolean @default(false)
+
+  emailNotifications       Boolean @default(true)
+  whatsappNotifications    Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

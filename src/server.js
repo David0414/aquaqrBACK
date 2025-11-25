@@ -17,6 +17,10 @@ const qrRoutes       = require('./routes/qr');
 const historyRoutes  = require('./routes/history');
 const profileRoutes  = require('./routes/profile');
 
+// src/server.js
+const notificationRoutes = require('./routes/notifications');
+
+
 const app = express();
 
 // CORS
@@ -48,6 +52,9 @@ app.use('/api/dispense', dispenseRoutes);
 
 // Historial (ej: GET /api/history)
 app.use('/api', historyRoutes);
+
+// 👇 notificaciones
+app.use('/api/notifications', notificationRoutes);
 
 // Perfil de usuario
 app.use('/api/profile', profileRoutes);
