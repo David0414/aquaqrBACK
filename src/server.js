@@ -9,10 +9,13 @@ const rechargeRoutes = require('./routes/recharge');
 const dispenseRoutes = require('./routes/dispense');
 const opsRoutes      = require('./routes/ops');
 const webhookRouter  = require('./routes/webhooks');
+
+// ✅ CORREGIDO: server.js ya está dentro de src/, así que no va './src/...'
 const qrRoutes       = require('./routes/qr');
+
+// (si ya existen en tu repo)
 const historyRoutes  = require('./routes/history');
 const profileRoutes  = require('./routes/profile');
-const notificationRoutes = require('./routes/notifications'); // 👈 AQUÍ IMPORTAS EL ROUTER
 
 const app = express();
 
@@ -33,14 +36,23 @@ app.get('/api/health', (_, res) => res.json({ ok: true }));
 
 // ---------- Rutas API ----------
 app.use('/api/qr', qrRoutes);
+
+// ✅ Usa `use` para montar el router bajo /m
+//    Si tu router de QR expone router.get('/') como “redirector público”,
+//    entonces GET /m?m=...&sig=... caerá aquí y redirigirá al FRONT.
 app.use('/m', qrRoutes);
 
 app.use('/api', walletRoutes);
 app.use('/api/recharge', rechargeRoutes);
 app.use('/api/dispense', dispenseRoutes);
+
+// Historial (ej: GET /api/history)
 app.use('/api', historyRoutes);
-app.use('/api/notifications', notificationRoutes); // 👈 aquí montas el router correcto
+
+// Perfil de usuario
 app.use('/api/profile', profileRoutes);
+
+// Rutas de operaciones (protegidas con x-admin-token)
 app.use('/ops', opsRoutes);
 
 // 404

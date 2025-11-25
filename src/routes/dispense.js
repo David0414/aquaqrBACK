@@ -72,11 +72,6 @@ function mapDispenseStatus(s) {
 /* ----------------------------------------------------------------------------- */
 /* POST /api/dispense                                                            */
 /* Body: { liters:number, machineId?:string, location?:string }                  */
-/* - Valida litros (¼, ½ o completo)                                             */
-/* - Calcula totalCents y pricePerLiterCents                                     */
-/* - Verifica saldo, descuenta Wallet, crea Ledger (DEBIT) y crea Dispense       */
-/* - Envía notificación por correo (si el usuario la tiene activada)             */
-/* Respuesta: { ok, liters, totalCents, pricePerLiterCents, currency, newBalanceCents } */
 /* ----------------------------------------------------------------------------- */
 router.post('/', requireAuth, async (req, res) => {
   try {
@@ -96,7 +91,9 @@ router.post('/', requireAuth, async (req, res) => {
 
     await ensureUserAndWallet(userId);
     const wallet = await prisma.wallet.findUnique({ where: { userId } });
-    if (!wallet) return res.status(500).json({ error: 'Wallet no encontrada' });
+    if (!wallet) {
+      return res.status(500).json({ error: 'Wallet no encontrada' });
+    }
 
     if (wallet.balanceCents < totalCents) {
       return res.status(400).json({
@@ -129,7 +126,7 @@ router.post('/', requireAuth, async (req, res) => {
         },
       });
 
-      // 3) Registro en DISPENSE (lo que usa /api/history)
+      // 3) Registro en DISPENSE
       const dispense = await tx.dispense.create({
         data: {
           userId,
@@ -150,17 +147,17 @@ router.post('/', requireAuth, async (req, res) => {
       };
     });
 
-    // 👉 Notificación por correo (usa la nueva firma del helper)
-    try {
-      await sendUserNotification(userId, {
-        type: 'dispense',          // 👈 este es el tipo que maneja notifications.js
-        amountCents: totalCents,   // se convierte a monto dentro del helper
-        liters: ltrs,              // para incluir los litros en el correo
-      });
-    } catch (errNotif) {
+    // 👉 NOTIFICACIÓN *NO BLOQUEANTE* (no usamos await)
+    //    Si Brevo tarda 1 minuto, tu endpoint responde igual en milisegundos.
+    sendUserNotification(userId, {
+      type: 'dispense',
+      amountCents: totalCents,
+      liters: ltrs,
+    }).catch((errNotif) => {
       console.error('[Dispense] Error enviando notificación', errNotif);
-    }
+    });
 
+    // Respuesta rápida al cliente
     return res.json({
       ok: true,
       liters: ltrs,
@@ -171,15 +168,12 @@ router.post('/', requireAuth, async (req, res) => {
     });
   } catch (e) {
     console.error('POST /api/dispense error', e);
-    return res
-      .status(500)
-      .json({ error: 'No se pudo registrar el dispensado' });
+    return res.status(500).json({ error: 'No se pudo registrar el dispensado' });
   }
 });
 
 /* ----------------------------------------------------------------------------- */
 /* GET /api/dispense/history?limit=20&cursor=<id>                                */
-/* Devuelve historial desde la tabla Dispense (la misma que llenas en POST)     */
 /* ----------------------------------------------------------------------------- */
 router.get('/history', requireAuth, async (req, res) => {
   try {
