@@ -75,7 +75,7 @@ function mapDispenseStatus(s) {
 /* - Valida litros (¼, ½ o completo)                                             */
 /* - Calcula totalCents y pricePerLiterCents                                     */
 /* - Verifica saldo, descuenta Wallet, crea Ledger (DEBIT) y crea Dispense       */
-/* - Envía notificación por correo (si el usuario la tiene activada)            */
+/* - Envía notificación por correo (si el usuario la tiene activada)             */
 /* Respuesta: { ok, liters, totalCents, pricePerLiterCents, currency, newBalanceCents } */
 /* ----------------------------------------------------------------------------- */
 router.post('/', requireAuth, async (req, res) => {
