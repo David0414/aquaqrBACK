@@ -2,9 +2,8 @@
 const express = require('express');
 const router = express.Router();
 const Stripe = require('stripe');
-const { PrismaClient } = require('@prisma/client');
+const { prisma } = require('../db');
 
-const prisma = new PrismaClient();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
   apiVersion: '2024-06-20',
 });

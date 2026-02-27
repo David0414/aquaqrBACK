@@ -102,7 +102,7 @@ router.post('/stripe', async (req, res) => {
         // 👇 Enviar correo de confirmación de recarga
         const amountFormatted = (amountCents / 100).toFixed(2);
 
-        await sendUserNotification({
+        sendUserNotification({
           userId,
           type: 'recharge',
           subject: 'Tu recarga en AquaQR se acreditó correctamente',
@@ -113,6 +113,8 @@ router.post('/stripe', async (req, res) => {
             <p>Ya puedes usar tu saldo para dispensar agua en cualquier máquina compatible 💧</p>
             <p>Gracias por usar AquaQR.</p>
           `,
+        }).catch((err) => {
+          console.error('No se pudo enviar notificación de recarga:', err?.message || err);
         });
       } else {
         console.warn('⚠️  No se pudo resolver userId para', providerPaymentId);
