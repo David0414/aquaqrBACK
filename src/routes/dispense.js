@@ -1,6 +1,7 @@
 // src/routes/dispense.js
 const express = require('express');
 const router = express.Router();
+const net = require('net');
 
 const { prisma } = require('../db');           // 👈 usa el singleton SIEMPRE
 const { requireAuth } = require('../utils/auth');
@@ -31,6 +32,15 @@ const LITERS_QUARTER = Math.round((GARRAFON_LITERS / 4) * 10) / 10; // ej. 5.0
 const LITERS_HALF = Math.round((GARRAFON_LITERS / 2) * 10) / 10;    // ej. 10.0
 const LITERS_FULL = GARRAFON_LITERS;                                // ej. 20
 const ALLOWED_LITERS = new Set([LITERS_QUARTER, LITERS_HALF, LITERS_FULL]);
+const DEMO_ACTION_TO_COMMAND = Object.freeze({
+  bomba_on: '1',
+  bomba_off: '0',
+  valvula_enjuague_on: '3',
+  valvula_enjuague_off: '4',
+  valvula_llenado_on: '5',
+  valvula_llenado_off: '6',
+  inputs: '7',
+});
 
 /* ----------------------------------------------------------------------------- */
 /* Utils                                                                         */
@@ -67,6 +77,90 @@ function mapDispenseStatus(s) {
     default:
       return 'completed';
   }
+}
+
+function controlHost() {
+  return process.env.WATERSERVER_HOST || '127.0.0.1';
+}
+
+function controlPort() {
+  const raw = Number.parseInt(process.env.WATERSERVER_CONTROL_PORT || '5003', 10);
+  return Number.isFinite(raw) ? raw : 5003;
+}
+
+function controlTimeoutMs() {
+  const raw = Number.parseInt(process.env.WATERSERVER_CONTROL_TIMEOUT_MS || '4000', 10);
+  return Number.isFinite(raw) ? raw : 4000;
+}
+
+function sendControlCommand(command) {
+  const host = controlHost();
+  const port = controlPort();
+  const timeoutMs = controlTimeoutMs();
+
+  return new Promise((resolve, reject) => {
+    const socket = new net.Socket();
+    const lines = [];
+    let buffer = '';
+    let settled = false;
+
+    const finish = (err, payload) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      if (err) reject(err);
+      else resolve(payload);
+    };
+
+    socket.setTimeout(timeoutMs);
+
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('utf8');
+      const parts = buffer.split(/\r?\n/);
+      buffer = parts.pop() || '';
+      for (const part of parts) {
+        const line = part.trim();
+        if (line.length > 0) lines.push(line);
+      }
+      if (lines.length >= 2) {
+        finish(null, {
+          welcome: lines[0] || null,
+          response: lines[lines.length - 1] || null,
+          lines,
+          host,
+          port,
+        });
+      }
+    });
+
+    socket.on('timeout', () => {
+      finish(new Error(`Timeout al conectar/controlar waterserver (${timeoutMs}ms)`));
+    });
+
+    socket.on('error', (err) => {
+      finish(err);
+    });
+
+    socket.on('close', () => {
+      if (settled) return;
+      if (buffer.trim().length > 0) lines.push(buffer.trim());
+      if (lines.length === 0) {
+        finish(new Error('Sin respuesta del waterserver'));
+        return;
+      }
+      finish(null, {
+        welcome: lines[0] || null,
+        response: lines[lines.length - 1] || null,
+        lines,
+        host,
+        port,
+      });
+    });
+
+    socket.connect(port, host, () => {
+      socket.write(`${command}\n`, 'utf8');
+    });
+  });
 }
 
 /* ----------------------------------------------------------------------------- */
@@ -248,6 +342,38 @@ router.get('/quote', (req, res) => {
     currency: CURRENCY,
     pricePerLiterCents: PRICE_PER_LITER_CENTS,
   });
+});
+
+/* ----------------------------------------------------------------------------- */
+/* POST /api/dispense/demo/control                                               */
+/* Body: { action: 'bomba_on' | ... }                                            */
+/* ----------------------------------------------------------------------------- */
+router.post('/demo/control', requireAuth, async (req, res) => {
+  try {
+    const action = String(req.body?.action || '').trim().toLowerCase();
+    const command = DEMO_ACTION_TO_COMMAND[action];
+
+    if (!command) {
+      return res.status(400).json({
+        error: 'Accion demo invalida',
+        allowedActions: Object.keys(DEMO_ACTION_TO_COMMAND),
+      });
+    }
+
+    const out = await sendControlCommand(command);
+    return res.json({
+      ok: true,
+      action,
+      command,
+      ...out,
+    });
+  } catch (e) {
+    console.error('POST /api/dispense/demo/control error', e);
+    return res.status(502).json({
+      error: 'No se pudo contactar waterserver',
+      detail: e.message,
+    });
+  }
 });
 
 module.exports = router;
