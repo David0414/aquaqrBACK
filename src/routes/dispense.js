@@ -40,6 +40,12 @@ const DEMO_ACTION_TO_COMMAND = Object.freeze({
   valvula_llenado_on: '5',
   valvula_llenado_off: '6',
   inputs: '7',
+  qr_inicio: '0x5A',
+  litros_5: '0x05',
+  litros_10: '0x10',
+  litros_20: '0x20',
+  enjuague: '0x21',
+  inicio_dispensado: '0x30',
 });
 
 /* ----------------------------------------------------------------------------- */
