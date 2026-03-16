@@ -95,8 +95,8 @@ function controlPort() {
 }
 
 function controlTimeoutMs() {
-  const raw = Number.parseInt(process.env.WATERSERVER_CONTROL_TIMEOUT_MS || '4000', 10);
-  return Number.isFinite(raw) ? raw : 4000;
+  const raw = Number.parseInt(process.env.WATERSERVER_CONTROL_TIMEOUT_MS || '10000', 10);
+  return Number.isFinite(raw) ? raw : 10000;
 }
 
 function sendControlCommand(command) {
@@ -321,12 +321,14 @@ router.get('/history', requireAuth, async (req, res) => {
 /* GET /api/dispense/config (pública)                                            */
 /* ----------------------------------------------------------------------------- */
 router.get('/config', (_req, res) => {
+  const optionsLiters = Array.from(ALLOWED_LITERS);
   res.json({
     currency: CURRENCY,
     garrafonLiters: GARRAFON_LITERS,
     pricePerGarrafonCents: PRICE_PER_GARRAFON_CENTS,
     pricePerLiterCents: PRICE_PER_LITER_CENTS,
-    optionsLiters: Array.from(ALLOWED_LITERS),
+    optionsLiters,
+    allowedLiters: optionsLiters,
   });
 });
 
