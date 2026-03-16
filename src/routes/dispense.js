@@ -292,6 +292,10 @@ router.post('/', requireAuth, async (req, res) => {
       });
     }
 
+    // Inicia el llenado en el equipo antes de registrar el cargo.
+    // Si el waterserver no responde, no descontamos saldo.
+    await sendControlCommand(DEMO_ACTION_TO_COMMAND.inicio_dispensado);
+
     const result = await prisma.$transaction(async (tx) => {
       // 1) Debita saldo del wallet
       const w = await tx.wallet.update({
