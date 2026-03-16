@@ -99,6 +99,16 @@ function controlTimeoutMs() {
   return Number.isFinite(raw) ? raw : 10000;
 }
 
+function monitorPort() {
+  const raw = Number.parseInt(process.env.WATERSERVER_MONITOR_PORT || '5002', 10);
+  return Number.isFinite(raw) ? raw : 5002;
+}
+
+function monitorTimeoutMs() {
+  const raw = Number.parseInt(process.env.WATERSERVER_MONITOR_TIMEOUT_MS || '2500', 10);
+  return Number.isFinite(raw) ? raw : 2500;
+}
+
 function sendControlCommand(command) {
   const host = controlHost();
   const port = controlPort();
@@ -166,6 +176,84 @@ function sendControlCommand(command) {
     socket.connect(port, host, () => {
       socket.write(`${command}\n`, 'utf8');
     });
+  });
+}
+
+function readMonitorFrame() {
+  const host = controlHost();
+  const port = monitorPort();
+  const timeoutMs = monitorTimeoutMs();
+
+  return new Promise((resolve, reject) => {
+    const socket = new net.Socket();
+    const lines = [];
+    let buffer = '';
+    let settled = false;
+
+    const finish = (err, payload) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      if (err) reject(err);
+      else resolve(payload);
+    };
+
+    socket.setTimeout(timeoutMs);
+
+    const flushBuffer = () => {
+      const trimmed = buffer.trim();
+      if (trimmed.length > 0) {
+        lines.push(trimmed);
+        buffer = '';
+      }
+    };
+
+    const tryFinishWithFrame = () => {
+      const frameLine = lines.find((line) => /E2[\s:-]?[0-9A-F]{2}/i.test(line) && /E3/i.test(line));
+      if (!frameLine) return false;
+
+      finish(null, {
+        response: frameLine,
+        lines,
+        host,
+        port,
+      });
+      return true;
+    };
+
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('utf8');
+      const parts = buffer.split(/\r?\n/);
+      buffer = parts.pop() || '';
+      for (const part of parts) {
+        const line = part.trim();
+        if (line.length > 0) lines.push(line);
+      }
+      tryFinishWithFrame();
+    });
+
+    socket.on('timeout', () => {
+      flushBuffer();
+      if (tryFinishWithFrame()) return;
+      finish(new Error(`Timeout al escuchar monitor waterserver (${timeoutMs}ms)`));
+    });
+
+    socket.on('error', (err) => {
+      finish(err);
+    });
+
+    socket.on('close', () => {
+      if (settled) return;
+      flushBuffer();
+      if (tryFinishWithFrame()) return;
+      if (lines.length === 0) {
+        finish(new Error('Sin respuesta del monitor waterserver'));
+        return;
+      }
+      finish(new Error('No se recibio una trama valida del monitor waterserver'));
+    });
+
+    socket.connect(port, host);
   });
 }
 
@@ -379,6 +467,23 @@ router.post('/demo/control', requireAuth, async (req, res) => {
     console.error('POST /api/dispense/demo/control error', e);
     return res.status(502).json({
       error: 'No se pudo contactar waterserver',
+      detail: e.message,
+    });
+  }
+});
+
+router.get('/demo/monitor', requireAuth, async (_req, res) => {
+  try {
+    const out = await readMonitorFrame();
+    return res.json({
+      ok: true,
+      source: 'monitor',
+      ...out,
+    });
+  } catch (e) {
+    console.error('GET /api/dispense/demo/monitor error', e);
+    return res.status(502).json({
+      error: 'No se pudo escuchar el monitor waterserver',
       detail: e.message,
     });
   }
