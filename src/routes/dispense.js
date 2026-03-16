@@ -45,7 +45,7 @@ const DEMO_ACTION_TO_COMMAND = Object.freeze({
   litros_10: '3',
   litros_20: '4',
   enjuague: '5',
-  inicio_dispensado: '6',
+  inicio_dispensado: '13',
 });
 
 /* ----------------------------------------------------------------------------- */
