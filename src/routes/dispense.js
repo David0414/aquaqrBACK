@@ -107,8 +107,8 @@ function monitorPort() {
 }
 
 function monitorTimeoutMs() {
-  const raw = Number.parseInt(process.env.WATERSERVER_MONITOR_TIMEOUT_MS || '2500', 10);
-  return Number.isFinite(raw) ? raw : 2500;
+  const raw = Number.parseInt(process.env.WATERSERVER_MONITOR_TIMEOUT_MS || '7000', 10);
+  return Number.isFinite(raw) ? raw : 7000;
 }
 
 function sendControlCommand(command) {
