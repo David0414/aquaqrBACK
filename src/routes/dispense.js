@@ -39,6 +39,8 @@ const DEMO_ACTION_TO_COMMAND = Object.freeze({
   valvula_enjuague_off: '4',
   valvula_llenado_on: '5',
   valvula_llenado_off: '6',
+  apagar_valvulas_forzado: 'FF',
+  reiniciar_sistema: '5A',
   inputs: '7',
   qr_inicio: '1',
   litros_5: '0',
@@ -257,6 +259,23 @@ function readMonitorFrame() {
   });
 }
 
+async function sendDemoAction(action) {
+  const command = DEMO_ACTION_TO_COMMAND[action];
+  if (!command) {
+    const error = new Error('Accion demo invalida');
+    error.statusCode = 400;
+    error.allowedActions = Object.keys(DEMO_ACTION_TO_COMMAND);
+    throw error;
+  }
+
+  const out = await sendControlCommand(command);
+  return {
+    action,
+    command,
+    ...out,
+  };
+}
+
 /* ----------------------------------------------------------------------------- */
 /* POST /api/dispense                                                            */
 /* Body: { liters:number, machineId?:string, location?:string }                  */
@@ -451,23 +470,15 @@ router.get('/quote', (req, res) => {
 router.post('/demo/control', requireAuth, async (req, res) => {
   try {
     const action = String(req.body?.action || '').trim().toLowerCase();
-    const command = DEMO_ACTION_TO_COMMAND[action];
-
-    if (!command) {
+    const out = await sendDemoAction(action);
+    return res.json({ ok: true, ...out });
+  } catch (e) {
+    if (e.statusCode === 400) {
       return res.status(400).json({
-        error: 'Accion demo invalida',
-        allowedActions: Object.keys(DEMO_ACTION_TO_COMMAND),
+        error: e.message,
+        ...(e.allowedActions ? { allowedActions: e.allowedActions } : {}),
       });
     }
-
-    const out = await sendControlCommand(command);
-    return res.json({
-      ok: true,
-      action,
-      command,
-      ...out,
-    });
-  } catch (e) {
     console.error('POST /api/dispense/demo/control error', e);
     return res.status(502).json({
       error: 'No se pudo contactar waterserver',
