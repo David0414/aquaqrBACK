@@ -33,12 +33,12 @@ const LITERS_HALF = Math.round((GARRAFON_LITERS / 2) * 10) / 10;    // ej. 10.0
 const LITERS_FULL = GARRAFON_LITERS;                                // ej. 20
 const ALLOWED_LITERS = new Set([LITERS_QUARTER, LITERS_HALF, LITERS_FULL]);
 const DEMO_ACTION_TO_COMMAND = Object.freeze({
-  bomba_on: '10',
-  bomba_off: '11',
-  valvula_enjuague_on: '14',
-  valvula_enjuague_off: '15',
-  valvula_llenado_on: '12',
-  valvula_llenado_off: '13',
+  bomba_on: '24',
+  bomba_off: '25',
+  valvula_enjuague_on: '20',
+  valvula_enjuague_off: '21',
+  valvula_llenado_on: '22',
+  valvula_llenado_off: '23',
   apagar_valvulas_forzado: 'FF',
   reiniciar_sistema: '5A',
   inputs: '01',
