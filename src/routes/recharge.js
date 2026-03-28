@@ -29,6 +29,13 @@ async function ensureUserAndWallet({ userId, email, name }) {
   });
 }
 
+function normalizeMachineId(value) {
+  return String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^0-9A-Z_-]/g, '') || 'UNKNOWN';
+}
+
 /** Mapea estatus de Prisma -> etiqueta de UI */
 function mapStatusToUi(status) {
   switch (status) {
@@ -290,6 +297,119 @@ router.post('/reconcile-pending', requireAuth, async (req, res) => {
   } catch (e) {
     console.error('POST /recharge/reconcile-pending error', e);
     res.status(500).json({ error: 'No se pudo reconciliar' });
+  }
+});
+
+/**
+ * POST /api/recharge/telemetry-credit
+ * Body: { machineId: string, pulseCount: number, rawFrame?: string }
+ * Acredita saldo por pulsos detectados en telemetria sin tocar la logica Stripe.
+ */
+router.post('/telemetry-credit', requireAuth, async (req, res) => {
+  try {
+    const { userId, email, name } = req.auth;
+    const machineId = normalizeMachineId(req.body?.machineId);
+    const pulseCount = Number.parseInt(req.body?.pulseCount, 10);
+    const rawFrame = typeof req.body?.rawFrame === 'string' ? req.body.rawFrame.trim().slice(0, 255) : null;
+
+    if (!Number.isFinite(pulseCount) || pulseCount < 0) {
+      return res.status(400).json({ error: 'pulseCount invalido' });
+    }
+
+    await ensureUserAndWallet({ userId, email, name });
+
+    const result = await prisma.$transaction(async (tx) => {
+      const checkpoint = await tx.telemetryCreditCheckpoint.upsert({
+        where: { userId_machineId: { userId, machineId } },
+        update: {},
+        create: {
+          userId,
+          machineId,
+          lastPulseCount: 0,
+          lastAmountCents: 0,
+          lastFrame: rawFrame,
+        },
+      });
+
+      if (pulseCount < checkpoint.lastPulseCount) {
+        await tx.telemetryCreditCheckpoint.update({
+          where: { id: checkpoint.id },
+          data: {
+            lastPulseCount: pulseCount,
+            lastFrame: rawFrame,
+          },
+        });
+
+        const wallet = await tx.wallet.findUnique({ where: { userId } });
+        return {
+          creditedCents: 0,
+          creditedPesos: 0,
+          balanceCents: wallet?.balanceCents ?? 0,
+          pulseCount,
+          previousPulseCount: checkpoint.lastPulseCount,
+          machineId,
+          resetDetected: true,
+        };
+      }
+
+      const deltaPulses = pulseCount - checkpoint.lastPulseCount;
+      if (deltaPulses <= 0) {
+        const wallet = await tx.wallet.findUnique({ where: { userId } });
+        return {
+          creditedCents: 0,
+          creditedPesos: 0,
+          balanceCents: wallet?.balanceCents ?? 0,
+          pulseCount,
+          previousPulseCount: checkpoint.lastPulseCount,
+          machineId,
+          resetDetected: false,
+        };
+      }
+
+      const creditedCents = deltaPulses * 100;
+      const wallet = await tx.wallet.upsert({
+        where: { userId },
+        update: { balanceCents: { increment: creditedCents } },
+        create: { userId, balanceCents: creditedCents },
+      });
+
+      await tx.telemetryCreditCheckpoint.update({
+        where: { id: checkpoint.id },
+        data: {
+          lastPulseCount: pulseCount,
+          lastAmountCents: { increment: creditedCents },
+          lastFrame: rawFrame,
+        },
+      });
+
+      await tx.ledgerEntry.create({
+        data: {
+          userId,
+          type: 'CREDIT',
+          amountCents: creditedCents,
+          currency: 'MXN',
+          description: `Recarga por telemetria de moneda (${deltaPulses} pulso${deltaPulses === 1 ? '' : 's'})`,
+          source: 'telemetry-pulse',
+          externalId: `telemetry:${userId}:${machineId}:${checkpoint.lastPulseCount}->${pulseCount}`,
+          status: 'POSTED',
+        },
+      });
+
+      return {
+        creditedCents,
+        creditedPesos: deltaPulses,
+        balanceCents: wallet.balanceCents,
+        pulseCount,
+        previousPulseCount: checkpoint.lastPulseCount,
+        machineId,
+        resetDetected: false,
+      };
+    });
+
+    return res.json(result);
+  } catch (e) {
+    console.error('POST /api/recharge/telemetry-credit error', e);
+    return res.status(500).json({ error: 'No se pudo acreditar la recarga por telemetria' });
   }
 });
 
