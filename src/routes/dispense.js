@@ -42,6 +42,7 @@ const DEMO_ACTION_TO_COMMAND = Object.freeze({
   apagar_valvulas_forzado: 'FF',
   reiniciar_sistema: '5A',
   inputs: '01',
+  recarga_monedas: '05',
   qr_inicio: '10',
   litros_5: '11',
   litros_10: '14',
