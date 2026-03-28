@@ -302,18 +302,19 @@ router.post('/reconcile-pending', requireAuth, async (req, res) => {
 
 /**
  * POST /api/recharge/telemetry-credit
- * Body: { machineId: string, pulseCount: number, rawFrame?: string }
- * Acredita saldo por pulsos detectados en telemetria sin tocar la logica Stripe.
+ * Body: { machineId: string, accumulatedAmount: number, pulseCount?: number, rawFrame?: string }
+ * Acredita saldo por dinero acumulado detectado en telemetria sin tocar la logica Stripe.
  */
 router.post('/telemetry-credit', requireAuth, async (req, res) => {
   try {
     const { userId, email, name } = req.auth;
     const machineId = normalizeMachineId(req.body?.machineId);
+    const accumulatedAmount = Number.parseInt(req.body?.accumulatedAmount, 10);
     const pulseCount = Number.parseInt(req.body?.pulseCount, 10);
     const rawFrame = typeof req.body?.rawFrame === 'string' ? req.body.rawFrame.trim().slice(0, 255) : null;
 
-    if (!Number.isFinite(pulseCount) || pulseCount < 0) {
-      return res.status(400).json({ error: 'pulseCount invalido' });
+    if (!Number.isFinite(accumulatedAmount) || accumulatedAmount < 0) {
+      return res.status(400).json({ error: 'accumulatedAmount invalido' });
     }
 
     await ensureUserAndWallet({ userId, email, name });
@@ -331,11 +332,14 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
         },
       });
 
-      if (pulseCount < checkpoint.lastPulseCount) {
+      const accumulatedCents = accumulatedAmount * 100;
+
+      if (accumulatedCents < checkpoint.lastAmountCents) {
         await tx.telemetryCreditCheckpoint.update({
           where: { id: checkpoint.id },
           data: {
-            lastPulseCount: pulseCount,
+            lastPulseCount: Number.isFinite(pulseCount) && pulseCount >= 0 ? pulseCount : 0,
+            lastAmountCents: accumulatedCents,
             lastFrame: rawFrame,
           },
         });
@@ -345,28 +349,31 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
           creditedCents: 0,
           creditedPesos: 0,
           balanceCents: wallet?.balanceCents ?? 0,
+          accumulatedAmount,
+          previousAccumulatedAmount: checkpoint.lastAmountCents / 100,
           pulseCount,
-          previousPulseCount: checkpoint.lastPulseCount,
+          previousPulseCount: checkpoint.lastPulseCount ?? 0,
           machineId,
           resetDetected: true,
         };
       }
 
-      const deltaPulses = pulseCount - checkpoint.lastPulseCount;
-      if (deltaPulses <= 0) {
+      const creditedCents = accumulatedCents - checkpoint.lastAmountCents;
+      if (creditedCents <= 0) {
         const wallet = await tx.wallet.findUnique({ where: { userId } });
         return {
           creditedCents: 0,
           creditedPesos: 0,
           balanceCents: wallet?.balanceCents ?? 0,
+          accumulatedAmount,
+          previousAccumulatedAmount: checkpoint.lastAmountCents / 100,
           pulseCount,
-          previousPulseCount: checkpoint.lastPulseCount,
+          previousPulseCount: checkpoint.lastPulseCount ?? 0,
           machineId,
           resetDetected: false,
         };
       }
 
-      const creditedCents = deltaPulses * 100;
       const wallet = await tx.wallet.upsert({
         where: { userId },
         update: { balanceCents: { increment: creditedCents } },
@@ -376,31 +383,34 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
       await tx.telemetryCreditCheckpoint.update({
         where: { id: checkpoint.id },
         data: {
-          lastPulseCount: pulseCount,
-          lastAmountCents: { increment: creditedCents },
+          lastPulseCount: Number.isFinite(pulseCount) && pulseCount >= 0 ? pulseCount : checkpoint.lastPulseCount,
+          lastAmountCents: accumulatedCents,
           lastFrame: rawFrame,
         },
       });
 
+      const creditedPesos = creditedCents / 100;
       await tx.ledgerEntry.create({
         data: {
           userId,
           type: 'CREDIT',
           amountCents: creditedCents,
           currency: 'MXN',
-          description: `Recarga por telemetria de moneda (${deltaPulses} pulso${deltaPulses === 1 ? '' : 's'})`,
-          source: 'telemetry-pulse',
-          externalId: `telemetry:${userId}:${machineId}:${checkpoint.lastPulseCount}->${pulseCount}`,
+          description: `Recarga por telemetria de moneda ($${creditedPesos} acumulados)`,
+          source: 'telemetry-accumulated',
+          externalId: `telemetry:${userId}:${machineId}:${checkpoint.lastAmountCents}->${accumulatedCents}`,
           status: 'POSTED',
         },
       });
 
       return {
         creditedCents,
-        creditedPesos: deltaPulses,
+        creditedPesos,
         balanceCents: wallet.balanceCents,
+        accumulatedAmount,
+        previousAccumulatedAmount: checkpoint.lastAmountCents / 100,
         pulseCount,
-        previousPulseCount: checkpoint.lastPulseCount,
+        previousPulseCount: checkpoint.lastPulseCount ?? 0,
         machineId,
         resetDetected: false,
       };
