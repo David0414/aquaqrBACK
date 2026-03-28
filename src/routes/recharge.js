@@ -302,19 +302,20 @@ router.post('/reconcile-pending', requireAuth, async (req, res) => {
 
 /**
  * POST /api/recharge/telemetry-credit
- * Body: { machineId: string, accumulatedAmount: number, pulseCount?: number, rawFrame?: string }
- * Acredita saldo por dinero acumulado detectado en telemetria sin tocar la logica Stripe.
+ * Body: { machineId: string, insertedAmount: number, accumulatedAmount?: number, pulseCount?: number, rawFrame?: string }
+ * Acredita saldo por moneda insertada detectada en telemetria sin tocar la logica Stripe.
  */
 router.post('/telemetry-credit', requireAuth, async (req, res) => {
   try {
     const { userId, email, name } = req.auth;
     const machineId = normalizeMachineId(req.body?.machineId);
+    const insertedAmount = Number.parseInt(req.body?.insertedAmount, 10);
     const accumulatedAmount = Number.parseInt(req.body?.accumulatedAmount, 10);
     const pulseCount = Number.parseInt(req.body?.pulseCount, 10);
     const rawFrame = typeof req.body?.rawFrame === 'string' ? req.body.rawFrame.trim().slice(0, 255) : null;
 
-    if (!Number.isFinite(accumulatedAmount) || accumulatedAmount < 0) {
-      return res.status(400).json({ error: 'accumulatedAmount invalido' });
+    if (!Number.isFinite(insertedAmount) || insertedAmount < 0) {
+      return res.status(400).json({ error: 'insertedAmount invalido' });
     }
 
     await ensureUserAndWallet({ userId, email, name });
@@ -332,7 +333,25 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
         },
       });
 
-      const accumulatedCents = accumulatedAmount * 100;
+      const accumulatedCents = Number.isFinite(accumulatedAmount) && accumulatedAmount >= 0
+        ? accumulatedAmount * 100
+        : checkpoint.lastAmountCents;
+      const insertedCents = insertedAmount * 100;
+
+      if (rawFrame && checkpoint.lastFrame === rawFrame) {
+        const wallet = await tx.wallet.findUnique({ where: { userId } });
+        return {
+          creditedCents: 0,
+          creditedPesos: 0,
+          balanceCents: wallet?.balanceCents ?? 0,
+          insertedAmount,
+          accumulatedAmount: accumulatedCents / 100,
+          pulseCount,
+          machineId,
+          duplicateFrame: true,
+          resetDetected: false,
+        };
+      }
 
       if (accumulatedCents < checkpoint.lastAmountCents) {
         await tx.telemetryCreditCheckpoint.update({
@@ -349,6 +368,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
           creditedCents: 0,
           creditedPesos: 0,
           balanceCents: wallet?.balanceCents ?? 0,
+          insertedAmount,
           accumulatedAmount,
           previousAccumulatedAmount: checkpoint.lastAmountCents / 100,
           pulseCount,
@@ -358,13 +378,23 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
         };
       }
 
-      const creditedCents = accumulatedCents - checkpoint.lastAmountCents;
+      const creditedCents = insertedCents;
       if (creditedCents <= 0) {
+        await tx.telemetryCreditCheckpoint.update({
+          where: { id: checkpoint.id },
+          data: {
+            lastPulseCount: Number.isFinite(pulseCount) && pulseCount >= 0 ? pulseCount : checkpoint.lastPulseCount,
+            lastAmountCents: accumulatedCents,
+            lastFrame: rawFrame,
+          },
+        });
+
         const wallet = await tx.wallet.findUnique({ where: { userId } });
         return {
           creditedCents: 0,
           creditedPesos: 0,
           balanceCents: wallet?.balanceCents ?? 0,
+          insertedAmount,
           accumulatedAmount,
           previousAccumulatedAmount: checkpoint.lastAmountCents / 100,
           pulseCount,
@@ -396,9 +426,9 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
           type: 'CREDIT',
           amountCents: creditedCents,
           currency: 'MXN',
-          description: `Recarga por telemetria de moneda ($${creditedPesos} acumulados)`,
-          source: 'telemetry-accumulated',
-          externalId: `telemetry:${userId}:${machineId}:${checkpoint.lastAmountCents}->${accumulatedCents}`,
+          description: `Recarga por telemetria de moneda ($${creditedPesos} insertados)`,
+          source: 'telemetry-coin',
+          externalId: `telemetry:${userId}:${machineId}:${rawFrame || `${checkpoint.lastAmountCents}:${insertedCents}`}`,
           status: 'POSTED',
         },
       });
@@ -407,6 +437,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
         creditedCents,
         creditedPesos,
         balanceCents: wallet.balanceCents,
+        insertedAmount,
         accumulatedAmount,
         previousAccumulatedAmount: checkpoint.lastAmountCents / 100,
         pulseCount,
