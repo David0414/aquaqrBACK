@@ -303,7 +303,8 @@ router.post('/reconcile-pending', requireAuth, async (req, res) => {
 /**
  * POST /api/recharge/telemetry-credit
  * Body: { machineId: string, insertedAmount: number, accumulatedAmount?: number, pulseCount?: number, rawFrame?: string }
- * Acredita saldo por moneda insertada detectada en telemetria sin tocar la logica Stripe.
+ * Acredita saldo por telemetria de monedas sin tocar la logica Stripe.
+ * Si la maquina reporta dinero acumulado, se acredita el delta contra la ultima lectura.
  */
 router.post('/telemetry-credit', requireAuth, async (req, res) => {
   try {
@@ -333,10 +334,11 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
         },
       });
 
-      const accumulatedCents = Number.isFinite(accumulatedAmount) && accumulatedAmount >= 0
+      const hasAccumulatedAmount = Number.isFinite(accumulatedAmount) && accumulatedAmount >= 0;
+      const accumulatedCents = hasAccumulatedAmount
         ? accumulatedAmount * 100
         : checkpoint.lastAmountCents;
-      const insertedCents = insertedAmount * 100;
+      const insertedCents = insertedAmount > 0 ? insertedAmount * 100 : 0;
 
       if (rawFrame && checkpoint.lastFrame === rawFrame) {
         const wallet = await tx.wallet.findUnique({ where: { userId } });
@@ -378,7 +380,9 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
         };
       }
 
-      const creditedCents = insertedCents;
+      const creditedCents = hasAccumulatedAmount
+        ? Math.max(0, accumulatedCents - checkpoint.lastAmountCents)
+        : insertedCents;
       if (creditedCents <= 0) {
         await tx.telemetryCreditCheckpoint.update({
           where: { id: checkpoint.id },
@@ -426,7 +430,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
           type: 'CREDIT',
           amountCents: creditedCents,
           currency: 'MXN',
-          description: `Recarga por telemetria de moneda ($${creditedPesos} insertados)`,
+          description: `Recarga por telemetria de moneda ($${creditedPesos} acreditados)`,
           source: 'telemetry-coin',
           externalId: `telemetry:${userId}:${machineId}:${rawFrame || `${checkpoint.lastAmountCents}:${insertedCents}`}`,
           status: 'POSTED',
