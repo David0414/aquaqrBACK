@@ -312,75 +312,182 @@ router.post('/', requireAuth, async (req, res) => {
       });
     }
 
-    // Inicia el llenado en el equipo antes de registrar el cargo.
-    // Si el waterserver no responde, no descontamos saldo.
+    // Inicia el llenado en el equipo, pero no descuenta saldo todavia.
+    // El cobro se confirma cuando la telemetria reporta proceso finalizado.
     await sendControlCommand(DEMO_ACTION_TO_COMMAND.inicio_dispensado);
 
+    const dispense = await prisma.dispense.create({
+      data: {
+        userId,
+        liters: ltrs,
+        pricePerLiterCents,
+        totalCents,
+        currency: CURRENCY,
+        status: 'STARTED',
+        machineId: machineId || null,
+        machineLocation: location || null,
+      },
+    });
+
+    return res.json({
+      ok: true,
+      status: 'STARTED',
+      txId: dispense.id,
+      liters: ltrs,
+      pricePerLiterCents,
+      amountCents: totalCents,
+      totalCents,
+      currency: CURRENCY,
+      prevBalanceCents: wallet.balanceCents,
+      newBalanceCents: wallet.balanceCents,
+    });
+  } catch (e) {
+    console.error('POST /api/dispense error', e);
+    return res.status(500).json({ error: 'No se pudo iniciar el dispensado' });
+  }
+});
+
+/* ----------------------------------------------------------------------------- */
+/* POST /api/dispense/complete                                                   */
+/* Body: { txId:string }                                                         */
+/* ----------------------------------------------------------------------------- */
+router.post('/complete', requireAuth, async (req, res) => {
+  try {
+    const { txId } = req.body || {};
+    const { userId } = req.auth;
+    const id = String(txId || '').trim();
+
+    if (!id) {
+      return res.status(400).json({ error: 'txId requerido' });
+    }
+
+    await ensureUserAndWallet(userId);
+
+    const existing = await prisma.dispense.findFirst({
+      where: { id, userId },
+    });
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Dispensado no encontrado' });
+    }
+
+    if (existing.status === 'COMPLETED') {
+      const wallet = await prisma.wallet.findUnique({ where: { userId } });
+      return res.json({
+        ok: true,
+        alreadyCompleted: true,
+        status: existing.status,
+        txId: existing.id,
+        liters: existing.liters,
+        pricePerLiterCents: existing.pricePerLiterCents,
+        amountCents: existing.totalCents,
+        totalCents: existing.totalCents,
+        currency: existing.currency,
+        newBalanceCents: wallet?.balanceCents ?? 0,
+      });
+    }
+
+    if (existing.status !== 'STARTED') {
+      return res.status(409).json({
+        error: `No se puede completar un dispensado en estado ${existing.status}`,
+        status: existing.status,
+      });
+    }
+
     const result = await prisma.$transaction(async (tx) => {
-      // 1) Debita saldo del wallet
-      const w = await tx.wallet.update({
-        where: { userId },
-        data: { balanceCents: { decrement: totalCents } },
+      const claimed = await tx.dispense.updateMany({
+        where: { id: existing.id, userId, status: 'STARTED' },
+        data: { status: 'COMPLETED' },
       });
 
-      // 2) Asiento contable (DEBIT) para auditoría
+      if (claimed.count !== 1) {
+        const current = await tx.dispense.findUnique({ where: { id: existing.id } });
+        return { alreadyCompleted: current?.status === 'COMPLETED' };
+      }
+
+      const wallet = await tx.wallet.findUnique({ where: { userId } });
+      if (!wallet) {
+        const error = new Error('Wallet no encontrada');
+        error.statusCode = 500;
+        throw error;
+      }
+
+      if (wallet.balanceCents < existing.totalCents) {
+        const error = new Error('INSUFFICIENT_FUNDS');
+        error.statusCode = 400;
+        error.code = 'INSUFFICIENT_FUNDS';
+        error.neededCents = existing.totalCents - wallet.balanceCents;
+        error.balanceCents = wallet.balanceCents;
+        error.totalCents = existing.totalCents;
+        throw error;
+      }
+
+      const updatedWallet = await tx.wallet.update({
+        where: { userId },
+        data: { balanceCents: { decrement: existing.totalCents } },
+      });
+
       const ledger = await tx.ledgerEntry.create({
         data: {
           userId,
           type: 'DEBIT',
-          amountCents: totalCents,
-          currency: CURRENCY,
-          description: `Dispensado de agua • ${ltrs}L`,
-          source: `DISPENSE${machineId ? `:${machineId}` : ''}${
-            location ? `@${location}` : ''
-          }`,
+          amountCents: existing.totalCents,
+          currency: existing.currency,
+          description: `Dispensado de agua • ${existing.liters}L`,
+          source: `DISPENSE:${existing.id}`,
+          externalId: `DISPENSE:${existing.id}`,
           status: 'POSTED',
         },
       });
 
-      // 3) Registro en DISPENSE
-      const dispense = await tx.dispense.create({
-        data: {
-          userId,
-          liters: ltrs,
-          pricePerLiterCents,
-          totalCents,
-          currency: CURRENCY,
-          status: 'COMPLETED',
-          machineId: machineId || null,
-          machineLocation: location || null,
-        },
-      });
-
       return {
-        newBalanceCents: w.balanceCents,
+        alreadyCompleted: false,
+        newBalanceCents: updatedWallet.balanceCents,
         ledgerId: ledger.id,
-        dispense,
       };
     });
 
-    // 👉 NOTIFICACIÓN *NO BLOQUEANTE* (no usamos await)
-    //    Si Brevo tarda 1 minuto, tu endpoint responde igual en milisegundos.
-    sendUserNotification(userId, {
-      type: 'dispense',
-      amountCents: totalCents,
-      liters: ltrs,
-    }).catch((errNotif) => {
-      console.error('[Dispense] Error enviando notificación', errNotif);
-    });
+    const wallet = result.alreadyCompleted
+      ? await prisma.wallet.findUnique({ where: { userId } })
+      : null;
 
-    // Respuesta rápida al cliente
+    if (!result.alreadyCompleted) {
+      sendUserNotification(userId, {
+        type: 'dispense',
+        amountCents: existing.totalCents,
+        liters: existing.liters,
+      }).catch((errNotif) => {
+        console.error('[Dispense] Error enviando notificacion', errNotif);
+      });
+    }
+
     return res.json({
       ok: true,
-      liters: ltrs,
-      pricePerLiterCents,
-      totalCents,
-      currency: CURRENCY,
-      newBalanceCents: result.newBalanceCents,
+      alreadyCompleted: result.alreadyCompleted,
+      status: 'COMPLETED',
+      txId: existing.id,
+      liters: existing.liters,
+      pricePerLiterCents: existing.pricePerLiterCents,
+      amountCents: existing.totalCents,
+      totalCents: existing.totalCents,
+      currency: existing.currency,
+      newBalanceCents: result.newBalanceCents ?? wallet?.balanceCents ?? 0,
+      ledgerId: result.ledgerId,
     });
   } catch (e) {
-    console.error('POST /api/dispense error', e);
-    return res.status(500).json({ error: 'No se pudo registrar el dispensado' });
+    if (e.code === 'INSUFFICIENT_FUNDS') {
+      return res.status(400).json({
+        error: 'INSUFFICIENT_FUNDS',
+        neededCents: e.neededCents,
+        balanceCents: e.balanceCents,
+        totalCents: e.totalCents,
+      });
+    }
+
+    console.error('POST /api/dispense/complete error', e);
+    return res.status(e.statusCode || 500).json({
+      error: e.message || 'No se pudo completar el dispensado',
+    });
   }
 });
 
