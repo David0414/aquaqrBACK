@@ -26,6 +26,7 @@ const ENV_PPL = intFromEnv('PRICE_PER_LITER_CENTS', NaN);
 const PRICE_PER_LITER_CENTS = Number.isFinite(ENV_PPL)
   ? ENV_PPL
   : Math.round(PRICE_PER_GARRAFON_CENTS / GARRAFON_LITERS);
+const DEFAULT_PULSES_PER_LITER = intFromEnv('FLOWMETER_PULSES_PER_LITER', 360);
 
 // Opciones de litros: 1/4, 1/2 y completo.
 const LITERS_QUARTER = Math.round((GARRAFON_LITERS / 4) * 10) / 10; // ej. 5.0
@@ -100,6 +101,17 @@ function controlPort() {
 function controlTimeoutMs() {
   const raw = Number.parseInt(process.env.WATERSERVER_CONTROL_TIMEOUT_MS || '10000', 10);
   return Number.isFinite(raw) ? raw : 10000;
+}
+
+function sanitizePulsesPerLiter(value, fallback = DEFAULT_PULSES_PER_LITER) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(parsed, 65535);
+}
+
+function buildControlCommandLine(command, pulsesPerLiter) {
+  const pulses = sanitizePulsesPerLiter(pulsesPerLiter);
+  return `${command} ${pulses}`;
 }
 
 function monitorPort() {
@@ -260,7 +272,7 @@ function readMonitorFrame() {
   });
 }
 
-async function sendDemoAction(action) {
+async function sendDemoAction(action, pulsesPerLiter) {
   const command = DEMO_ACTION_TO_COMMAND[action];
   if (!command) {
     const error = new Error('Accion demo invalida');
@@ -269,10 +281,14 @@ async function sendDemoAction(action) {
     throw error;
   }
 
-  const out = await sendControlCommand(command);
+  const safePulsesPerLiter = sanitizePulsesPerLiter(pulsesPerLiter);
+  const commandLine = buildControlCommandLine(command, safePulsesPerLiter);
+  const out = await sendControlCommand(commandLine);
   return {
     action,
     command,
+    commandLine,
+    pulsesPerLiter: safePulsesPerLiter,
     ...out,
   };
 }
@@ -283,7 +299,7 @@ async function sendDemoAction(action) {
 /* ----------------------------------------------------------------------------- */
 router.post('/', requireAuth, async (req, res) => {
   try {
-    const { liters, machineId, location } = req.body || {};
+    const { liters, machineId, location, pulsesPerLiter } = req.body || {};
     const { userId } = req.auth;
 
     const ltrs = Number(liters);
@@ -314,7 +330,8 @@ router.post('/', requireAuth, async (req, res) => {
 
     // Inicia el llenado en el equipo, pero no descuenta saldo todavia.
     // El cobro se confirma cuando la telemetria reporta proceso finalizado.
-    await sendControlCommand(DEMO_ACTION_TO_COMMAND.inicio_dispensado);
+    const safePulsesPerLiter = sanitizePulsesPerLiter(pulsesPerLiter);
+    await sendControlCommand(buildControlCommandLine(DEMO_ACTION_TO_COMMAND.inicio_dispensado, safePulsesPerLiter));
 
     const dispense = await prisma.dispense.create({
       data: {
@@ -338,6 +355,7 @@ router.post('/', requireAuth, async (req, res) => {
       amountCents: totalCents,
       totalCents,
       currency: CURRENCY,
+      pulsesPerLiter: safePulsesPerLiter,
       prevBalanceCents: wallet.balanceCents,
       newBalanceCents: wallet.balanceCents,
     });
@@ -578,7 +596,7 @@ router.get('/quote', (req, res) => {
 router.post('/demo/control', requireAuth, async (req, res) => {
   try {
     const action = String(req.body?.action || '').trim().toLowerCase();
-    const out = await sendDemoAction(action);
+    const out = await sendDemoAction(action, req.body?.pulsesPerLiter);
     return res.json({ ok: true, ...out });
   } catch (e) {
     if (e.statusCode === 400) {
