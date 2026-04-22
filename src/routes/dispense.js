@@ -283,6 +283,7 @@ function ensureMonitorConnection() {
   socket.on('error', (error) => {
     monitorState.connecting = false;
     rejectMonitorWaiters(error);
+    socket.destroy();
   });
 
   socket.on('close', () => {
