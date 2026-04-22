@@ -124,6 +124,11 @@ function monitorTimeoutMs() {
   return Number.isFinite(raw) ? raw : 7000;
 }
 
+function monitorFrameMaxAgeMs() {
+  const raw = Number.parseInt(process.env.WATERSERVER_MONITOR_MAX_AGE_MS || '3000', 10);
+  return Number.isFinite(raw) ? raw : 3000;
+}
+
 function sendControlCommand(command) {
   const host = controlHost();
   const port = controlPort();
@@ -194,81 +199,130 @@ function sendControlCommand(command) {
   });
 }
 
-function readMonitorFrame() {
+let controlQueue = Promise.resolve();
+
+function enqueueControlCommand(command) {
+  const run = () => sendControlCommand(command);
+  const next = controlQueue.then(run, run);
+  controlQueue = next.catch(() => {});
+  return next;
+}
+
+const monitorState = {
+  socket: null,
+  buffer: '',
+  latestFrame: null,
+  waiters: [],
+  reconnectTimer: null,
+  connecting: false,
+};
+
+function isMonitorFrameLine(line) {
+  return /E2[\s:-]?[0-9A-F]{2}/i.test(line) && /E3/i.test(line);
+}
+
+function resolveMonitorWaiters(frame) {
+  const waiters = monitorState.waiters.splice(0);
+  waiters.forEach((waiter) => waiter.resolve(frame));
+}
+
+function rejectMonitorWaiters(error) {
+  const waiters = monitorState.waiters.splice(0);
+  waiters.forEach((waiter) => waiter.reject(error));
+}
+
+function scheduleMonitorReconnect() {
+  if (monitorState.reconnectTimer) return;
+  monitorState.reconnectTimer = setTimeout(() => {
+    monitorState.reconnectTimer = null;
+    ensureMonitorConnection();
+  }, 1000);
+}
+
+function handleMonitorLine(line) {
+  if (!isMonitorFrameLine(line)) return;
+
+  monitorState.latestFrame = {
+    response: line,
+    lines: [line],
+    host: controlHost(),
+    port: monitorPort(),
+    receivedAt: Date.now(),
+  };
+  resolveMonitorWaiters(monitorState.latestFrame);
+}
+
+function ensureMonitorConnection() {
+  if (monitorState.socket || monitorState.connecting) return;
+
   const host = controlHost();
   const port = monitorPort();
+  const socket = new net.Socket();
+
+  monitorState.connecting = true;
+  monitorState.buffer = '';
+  monitorState.socket = socket;
+
+  socket.setKeepAlive(true, 1000);
+
+  socket.on('connect', () => {
+    monitorState.connecting = false;
+  });
+
+  socket.on('data', (chunk) => {
+    monitorState.buffer += chunk.toString('utf8');
+    const parts = monitorState.buffer.split(/\r?\n/);
+    monitorState.buffer = parts.pop() || '';
+
+    for (const part of parts) {
+      const line = part.trim();
+      if (line.length > 0) handleMonitorLine(line);
+    }
+  });
+
+  socket.on('error', (error) => {
+    monitorState.connecting = false;
+    rejectMonitorWaiters(error);
+  });
+
+  socket.on('close', () => {
+    monitorState.connecting = false;
+    monitorState.socket = null;
+    scheduleMonitorReconnect();
+  });
+
+  socket.connect(port, host);
+}
+
+function readMonitorFrame() {
   const timeoutMs = monitorTimeoutMs();
+  ensureMonitorConnection();
+
+  if (
+    monitorState.latestFrame
+    && Date.now() - monitorState.latestFrame.receivedAt <= monitorFrameMaxAgeMs()
+  ) {
+    return Promise.resolve(monitorState.latestFrame);
+  }
 
   return new Promise((resolve, reject) => {
-    const socket = new net.Socket();
-    const lines = [];
-    let buffer = '';
-    let settled = false;
-
-    const finish = (err, payload) => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      if (err) reject(err);
-      else resolve(payload);
+    const waiter = {
+      resolve: (frame) => {
+        clearTimeout(waiter.timer);
+        resolve(frame);
+      },
+      reject: (error) => {
+        clearTimeout(waiter.timer);
+        reject(error);
+      },
+      timer: null,
     };
+    waiter.timer = setTimeout(() => {
+      monitorState.waiters = monitorState.waiters.filter((item) => item !== waiter);
+      reject(new Error(`Timeout al escuchar monitor waterserver (${timeoutMs}ms)`));
+    }, timeoutMs);
 
-    socket.setTimeout(timeoutMs);
-
-    const flushBuffer = () => {
-      const trimmed = buffer.trim();
-      if (trimmed.length > 0) {
-        lines.push(trimmed);
-        buffer = '';
-      }
-    };
-
-    const tryFinishWithFrame = () => {
-      const frameLine = lines.find((line) => /E2[\s:-]?[0-9A-F]{2}/i.test(line) && /E3/i.test(line));
-      if (!frameLine) return false;
-
-      finish(null, {
-        response: frameLine,
-        lines,
-        host,
-        port,
-      });
-      return true;
-    };
-
-    socket.on('data', (chunk) => {
-      buffer += chunk.toString('utf8');
-      const parts = buffer.split(/\r?\n/);
-      buffer = parts.pop() || '';
-      for (const part of parts) {
-        const line = part.trim();
-        if (line.length > 0) lines.push(line);
-      }
-      tryFinishWithFrame();
-    });
-
-    socket.on('timeout', () => {
-      flushBuffer();
-      if (tryFinishWithFrame()) return;
-      finish(new Error(`Timeout al escuchar monitor waterserver (${timeoutMs}ms)`));
-    });
-
-    socket.on('error', (err) => {
-      finish(err);
-    });
-
-    socket.on('close', () => {
-      if (settled) return;
-      flushBuffer();
-      if (tryFinishWithFrame()) return;
-      if (lines.length === 0) {
-        finish(new Error('Sin respuesta del monitor waterserver'));
-        return;
-      }
-      finish(new Error('No se recibio una trama valida del monitor waterserver'));
-    });
-
-    socket.connect(port, host);
+    monitorState.waiters.push(waiter);
   });
 }
 
@@ -283,7 +337,7 @@ async function sendDemoAction(action, pulsesPerLiter) {
 
   const safePulsesPerLiter = sanitizePulsesPerLiter(pulsesPerLiter);
   const commandLine = buildControlCommandLine(command, safePulsesPerLiter);
-  const out = await sendControlCommand(commandLine);
+  const out = await enqueueControlCommand(commandLine);
   return {
     action,
     command,
@@ -331,7 +385,7 @@ router.post('/', requireAuth, async (req, res) => {
     // Inicia el llenado en el equipo, pero no descuenta saldo todavia.
     // El cobro se confirma cuando la telemetria reporta proceso finalizado.
     const safePulsesPerLiter = sanitizePulsesPerLiter(pulsesPerLiter);
-    await sendControlCommand(buildControlCommandLine(DEMO_ACTION_TO_COMMAND.inicio_dispensado, safePulsesPerLiter));
+    await enqueueControlCommand(buildControlCommandLine(DEMO_ACTION_TO_COMMAND.inicio_dispensado, safePulsesPerLiter));
 
     const dispense = await prisma.dispense.create({
       data: {
