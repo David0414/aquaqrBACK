@@ -91,6 +91,45 @@ function machineLockExpiresAt() {
   return new Date(Date.now() + MACHINE_LOCK_TTL_MS);
 }
 
+function isActiveLock(lock, now = new Date()) {
+  return Boolean(lock && lock.expiresAt > now);
+}
+
+async function findMachineLockConflict(machineId, hardwareId, userId) {
+  const now = new Date();
+  const where = [];
+
+  if (machineId) where.push({ machineId });
+  if (hardwareId) where.push({ hardwareId });
+  if (where.length === 0) return null;
+
+  const locks = await prisma.machineLock.findMany({
+    where: { OR: where },
+    orderBy: { updatedAt: 'desc' },
+  });
+
+  return locks.find((lock) => isActiveLock(lock, now) && lock.userId !== userId) || null;
+}
+
+async function findOwnMachineLock(machineId, hardwareId, userId) {
+  const now = new Date();
+  const where = [];
+
+  if (machineId) where.push({ machineId });
+  if (hardwareId) where.push({ hardwareId });
+  if (where.length === 0) return null;
+
+  const locks = await prisma.machineLock.findMany({
+    where: {
+      userId,
+      OR: where,
+    },
+    orderBy: { updatedAt: 'desc' },
+  });
+
+  return locks.find((lock) => isActiveLock(lock, now)) || null;
+}
+
 function throwMachineBusy(lock, userId) {
   const error = new Error(
     lock.userId === userId
@@ -107,14 +146,14 @@ function throwMachineBusy(lock, userId) {
 
 async function acquireMachineLock(machineIdValue, userId, options = {}) {
   const machineId = normalizeMachineId(machineIdValue);
-  if (!machineId) return null;
+  const hardwareId = options.hardwareId === undefined
+    ? undefined
+    : normalizeHardwareId(options.hardwareId);
+  if (!machineId && !hardwareId) return null;
 
   const now = new Date();
   const expiresAt = machineLockExpiresAt();
   const txId = options.txId === undefined ? undefined : options.txId;
-  const hardwareId = options.hardwareId === undefined
-    ? undefined
-    : normalizeHardwareId(options.hardwareId);
   const machineLocation = options.machineLocation === undefined
     ? undefined
     : String(options.machineLocation || '').trim() || null;
@@ -124,14 +163,17 @@ async function acquireMachineLock(machineIdValue, userId, options = {}) {
   const safeSelectedLiters =
     Number.isFinite(selectedLiters) && selectedLiters > 0 ? selectedLiters : null;
 
-  const existing = await prisma.machineLock.findUnique({ where: { machineId } });
-  if (existing && existing.expiresAt > now && existing.userId !== userId) {
-    throwMachineBusy(existing, userId);
+  const conflict = await findMachineLockConflict(machineId, hardwareId, userId);
+  if (conflict) {
+    throwMachineBusy(conflict, userId);
   }
+  const ownLock = await findOwnMachineLock(machineId, hardwareId, userId);
+  const lockMachineId = machineId || ownLock?.machineId;
+  if (!lockMachineId) return null;
 
   try {
     return await prisma.machineLock.upsert({
-      where: { machineId },
+      where: { machineId: lockMachineId },
       update: {
         userId,
         expiresAt,
@@ -141,7 +183,7 @@ async function acquireMachineLock(machineIdValue, userId, options = {}) {
         ...(options.selectedLiters !== undefined ? { selectedLiters: safeSelectedLiters } : {}),
       },
       create: {
-        machineId,
+        machineId: lockMachineId,
         userId,
         expiresAt,
         ...(txId !== undefined ? { txId } : {}),
@@ -152,7 +194,7 @@ async function acquireMachineLock(machineIdValue, userId, options = {}) {
     });
   } catch (error) {
     if (error?.code === 'P2002') {
-      const lock = await prisma.machineLock.findUnique({ where: { machineId } });
+      const lock = await findMachineLockConflict(lockMachineId, hardwareId, userId);
       if (lock && lock.expiresAt > now && lock.userId !== userId) {
         throwMachineBusy(lock, userId);
       }
@@ -163,19 +205,25 @@ async function acquireMachineLock(machineIdValue, userId, options = {}) {
 
 async function requireMachineLockOwner(machineIdValue, userId, options = {}) {
   const machineId = normalizeMachineId(machineIdValue);
-  if (!machineId) return null;
+  const hardwareId = normalizeHardwareId(options.hardwareId);
+  if (!machineId && !hardwareId) return null;
 
   const now = new Date();
-  const lock = await prisma.machineLock.findUnique({ where: { machineId } });
+  const conflict = await findMachineLockConflict(machineId, hardwareId, userId);
+  if (conflict) {
+    throwMachineBusy(conflict, userId);
+  }
+
+  const lock = await findOwnMachineLock(machineId, hardwareId, userId);
   if (!lock || lock.expiresAt <= now) {
-    return acquireMachineLock(machineId, userId);
+    return acquireMachineLock(machineId, userId, options);
   }
   if (lock.userId !== userId) {
     throwMachineBusy(lock, userId);
   }
-  return acquireMachineLock(machineId, userId, {
+  return acquireMachineLock(lock.machineId || machineId, userId, {
     txId: lock.txId,
-    hardwareId: options.hardwareId ?? lock.hardwareId,
+    hardwareId: hardwareId ?? lock.hardwareId,
     machineLocation: options.machineLocation ?? lock.machineLocation,
     selectedLiters: options.selectedLiters ?? lock.selectedLiters,
   });
