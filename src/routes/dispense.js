@@ -27,6 +27,7 @@ const PRICE_PER_LITER_CENTS = Number.isFinite(ENV_PPL)
   ? ENV_PPL
   : Math.round(PRICE_PER_GARRAFON_CENTS / GARRAFON_LITERS);
 const DEFAULT_PULSES_PER_LITER = intFromEnv('FLOWMETER_PULSES_PER_LITER', 360);
+const MACHINE_LOCK_TTL_MS = intFromEnv('MACHINE_LOCK_TTL_MS', 20 * 60 * 1000);
 
 // Opciones de litros: 1/4, 1/2 y completo.
 const LITERS_QUARTER = Math.round((GARRAFON_LITERS / 4) * 10) / 10; // ej. 5.0
@@ -73,6 +74,194 @@ async function ensureUserAndWallet(userId) {
 function totalForLiters(ltrs) {
   // total en centavos, entero
   return Math.round(ltrs * PRICE_PER_LITER_CENTS);
+}
+
+function normalizeMachineId(value) {
+  const machineId = String(value || '').trim();
+  return machineId || null;
+}
+
+function normalizeHardwareId(value) {
+  const hardwareId = String(value || '').trim().toUpperCase().replace(/[^0-9A-F]/g, '');
+  if (!hardwareId) return null;
+  return hardwareId.padStart(2, '0').slice(-2);
+}
+
+function machineLockExpiresAt() {
+  return new Date(Date.now() + MACHINE_LOCK_TTL_MS);
+}
+
+function throwMachineBusy(lock, userId) {
+  const error = new Error(
+    lock.userId === userId
+      ? 'Esta maquina ya tiene un proceso activo con tu usuario'
+      : 'Esta maquina esta en uso por otro usuario'
+  );
+  error.statusCode = 423;
+  error.code = 'MACHINE_BUSY';
+  error.machineId = lock.machineId;
+  error.expiresAt = lock.expiresAt;
+  error.isOwnLock = lock.userId === userId;
+  throw error;
+}
+
+async function acquireMachineLock(machineIdValue, userId, options = {}) {
+  const machineId = normalizeMachineId(machineIdValue);
+  if (!machineId) return null;
+
+  const now = new Date();
+  const expiresAt = machineLockExpiresAt();
+  const txId = options.txId === undefined ? undefined : options.txId;
+  const hardwareId = options.hardwareId === undefined
+    ? undefined
+    : normalizeHardwareId(options.hardwareId);
+
+  const existing = await prisma.machineLock.findUnique({ where: { machineId } });
+  if (existing && existing.expiresAt > now && existing.userId !== userId) {
+    throwMachineBusy(existing, userId);
+  }
+
+  try {
+    return await prisma.machineLock.upsert({
+      where: { machineId },
+      update: {
+        userId,
+        expiresAt,
+        ...(txId !== undefined ? { txId } : {}),
+        ...(hardwareId !== undefined ? { hardwareId } : {}),
+      },
+      create: {
+        machineId,
+        userId,
+        expiresAt,
+        ...(txId !== undefined ? { txId } : {}),
+        ...(hardwareId !== undefined ? { hardwareId } : {}),
+      },
+    });
+  } catch (error) {
+    if (error?.code === 'P2002') {
+      const lock = await prisma.machineLock.findUnique({ where: { machineId } });
+      if (lock && lock.expiresAt > now && lock.userId !== userId) {
+        throwMachineBusy(lock, userId);
+      }
+    }
+    throw error;
+  }
+}
+
+async function requireMachineLockOwner(machineIdValue, userId, options = {}) {
+  const machineId = normalizeMachineId(machineIdValue);
+  if (!machineId) return null;
+
+  const now = new Date();
+  const lock = await prisma.machineLock.findUnique({ where: { machineId } });
+  if (!lock || lock.expiresAt <= now) {
+    return acquireMachineLock(machineId, userId);
+  }
+  if (lock.userId !== userId) {
+    throwMachineBusy(lock, userId);
+  }
+  return acquireMachineLock(machineId, userId, {
+    txId: lock.txId,
+    hardwareId: options.hardwareId ?? lock.hardwareId,
+  });
+}
+
+async function releaseMachineLock(machineIdValue, userId) {
+  const machineId = normalizeMachineId(machineIdValue);
+  if (!machineId) return;
+  await prisma.machineLock.deleteMany({ where: { machineId, userId } });
+}
+
+function sendMachineBusy(res, error) {
+  return res.status(423).json({
+    error: 'MACHINE_BUSY',
+    message: error.message || 'Esta maquina esta ocupada',
+    machineId: error.machineId,
+    expiresAt: error.expiresAt,
+    isOwnLock: Boolean(error.isOwnLock),
+  });
+}
+
+async function completeStartedDispense(existing, source = 'api') {
+  if (!existing) {
+    return { completed: false, reason: 'missing-dispense' };
+  }
+
+  if (existing.status === 'COMPLETED') {
+    return { completed: false, alreadyCompleted: true };
+  }
+
+  if (existing.status !== 'STARTED') {
+    return { completed: false, reason: `status-${existing.status}` };
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    const claimed = await tx.dispense.updateMany({
+      where: { id: existing.id, userId: existing.userId, status: 'STARTED' },
+      data: { status: 'COMPLETED' },
+    });
+
+    if (claimed.count !== 1) {
+      const current = await tx.dispense.findUnique({ where: { id: existing.id } });
+      return { alreadyCompleted: current?.status === 'COMPLETED' };
+    }
+
+    const wallet = await tx.wallet.findUnique({ where: { userId: existing.userId } });
+    if (!wallet) {
+      const error = new Error('Wallet no encontrada');
+      error.statusCode = 500;
+      throw error;
+    }
+
+    if (wallet.balanceCents < existing.totalCents) {
+      const error = new Error('INSUFFICIENT_FUNDS');
+      error.statusCode = 400;
+      error.code = 'INSUFFICIENT_FUNDS';
+      error.neededCents = existing.totalCents - wallet.balanceCents;
+      error.balanceCents = wallet.balanceCents;
+      error.totalCents = existing.totalCents;
+      throw error;
+    }
+
+    const updatedWallet = await tx.wallet.update({
+      where: { userId: existing.userId },
+      data: { balanceCents: { decrement: existing.totalCents } },
+    });
+
+    const ledger = await tx.ledgerEntry.create({
+      data: {
+        userId: existing.userId,
+        type: 'DEBIT',
+        amountCents: existing.totalCents,
+        currency: existing.currency,
+        description: `Dispensado de agua - ${existing.liters}L`,
+        source: `DISPENSE:${existing.id}`,
+        externalId: `DISPENSE:${existing.id}`,
+        status: 'POSTED',
+      },
+    });
+
+    return {
+      alreadyCompleted: false,
+      newBalanceCents: updatedWallet.balanceCents,
+      ledgerId: ledger.id,
+    };
+  });
+
+  await releaseMachineLock(existing.machineId, existing.userId);
+
+  if (!result.alreadyCompleted) {
+    sendUserNotification(existing.userId, {
+      type: 'dispense',
+      amountCents: existing.totalCents,
+      liters: existing.liters,
+    }).catch((errNotif) => {
+      console.error(`[Dispense] Error enviando notificacion (${source})`, errNotif);
+    });
+  }
+
+  return { completed: true, ...result };
 }
 
 function mapDispenseStatus(s) {
@@ -216,9 +405,29 @@ const monitorState = {
   reconnectTimer: null,
   connecting: false,
 };
+const autoCompleteInFlight = new Set();
 
 function isMonitorFrameLine(line) {
   return /E2[\s:-]?[0-9A-F]{2}/i.test(line) && /E3/i.test(line);
+}
+
+function extractMonitorFrameBytes(line) {
+  const matches = String(line || '').toUpperCase().match(/[0-9A-F]{2}/g) || [];
+  for (let index = 0; index <= matches.length - 15; index += 1) {
+    const chunk = matches.slice(index, index + 15);
+    if (chunk[0] === 'E2' && chunk[14] === 'E3') return chunk;
+  }
+  return null;
+}
+
+function parseMonitorTelemetry(line) {
+  const bytes = extractMonitorFrameBytes(line);
+  if (!bytes) return null;
+  return {
+    machineHardwareId: normalizeHardwareId(bytes[1]),
+    currentStageCode: normalizeHardwareId(bytes[9]) || '00',
+    rawFrame: bytes.join('-'),
+  };
 }
 
 function resolveMonitorWaiters(frame) {
@@ -241,6 +450,7 @@ function scheduleMonitorReconnect() {
 
 function handleMonitorLine(line) {
   if (!isMonitorFrameLine(line)) return;
+  const parsed = parseMonitorTelemetry(line);
 
   monitorState.latestFrame = {
     response: line,
@@ -250,6 +460,10 @@ function handleMonitorLine(line) {
     receivedAt: Date.now(),
   };
   resolveMonitorWaiters(monitorState.latestFrame);
+
+  maybeCompleteDispenseFromTelemetry(parsed).catch((error) => {
+    console.error('[Dispense] Error en cierre automatico por telemetria', error);
+  });
 }
 
 function ensureMonitorConnection() {
@@ -327,6 +541,63 @@ function readMonitorFrame() {
   });
 }
 
+async function findLockForTelemetry(machineHardwareId) {
+  const now = new Date();
+  if (machineHardwareId) {
+    const lock = await prisma.machineLock.findFirst({
+      where: {
+        hardwareId: machineHardwareId,
+        txId: { not: null },
+        expiresAt: { gt: now },
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+    if (lock) return lock;
+  }
+
+  const locks = await prisma.machineLock.findMany({
+    where: {
+      txId: { not: null },
+      expiresAt: { gt: now },
+    },
+    orderBy: { updatedAt: 'desc' },
+    take: 2,
+  });
+
+  return locks.length === 1 ? locks[0] : null;
+}
+
+async function maybeCompleteDispenseFromTelemetry(parsed) {
+  if (!parsed) return;
+  if (parsed.currentStageCode !== '07') return;
+
+  const lock = await findLockForTelemetry(parsed.machineHardwareId);
+  if (!lock?.txId) return;
+  if (autoCompleteInFlight.has(lock.txId)) return;
+
+  autoCompleteInFlight.add(lock.txId);
+  try {
+    const existing = await prisma.dispense.findFirst({
+      where: {
+        id: lock.txId,
+        userId: lock.userId,
+        status: 'STARTED',
+      },
+    });
+    if (!existing) {
+      await releaseMachineLock(lock.machineId, lock.userId);
+      return;
+    }
+
+    const result = await completeStartedDispense(existing, 'telemetry');
+    if (result.completed || result.alreadyCompleted) {
+      console.log(`[Dispense] Cierre automatico por telemetria: ${existing.id}`);
+    }
+  } finally {
+    autoCompleteInFlight.delete(lock.txId);
+  }
+}
+
 async function sendDemoAction(action, pulsesPerLiter) {
   const command = DEMO_ACTION_TO_COMMAND[action];
   if (!command) {
@@ -354,7 +625,7 @@ async function sendDemoAction(action, pulsesPerLiter) {
 /* ----------------------------------------------------------------------------- */
 router.post('/', requireAuth, async (req, res) => {
   try {
-    const { liters, machineId, location, pulsesPerLiter } = req.body || {};
+    const { liters, machineId, location, pulsesPerLiter, hardwareId } = req.body || {};
     const { userId } = req.auth;
 
     const ltrs = Number(liters);
@@ -367,8 +638,11 @@ router.post('/', requireAuth, async (req, res) => {
 
     const pricePerLiterCents = PRICE_PER_LITER_CENTS;
     const totalCents = totalForLiters(ltrs);
+    const safeMachineId = normalizeMachineId(machineId);
 
     await ensureUserAndWallet(userId);
+    await requireMachineLockOwner(safeMachineId, userId, { hardwareId });
+
     const wallet = await prisma.wallet.findUnique({ where: { userId } });
     if (!wallet) {
       return res.status(500).json({ error: 'Wallet no encontrada' });
@@ -396,10 +670,12 @@ router.post('/', requireAuth, async (req, res) => {
         totalCents,
         currency: CURRENCY,
         status: 'STARTED',
-        machineId: machineId || null,
+        machineId: safeMachineId,
         machineLocation: location || null,
       },
     });
+
+    await acquireMachineLock(safeMachineId, userId, { txId: dispense.id, hardwareId });
 
     return res.json({
       ok: true,
@@ -415,6 +691,10 @@ router.post('/', requireAuth, async (req, res) => {
       newBalanceCents: wallet.balanceCents,
     });
   } catch (e) {
+    if (e.code === 'MACHINE_BUSY') {
+      return sendMachineBusy(res, e);
+    }
+
     console.error('POST /api/dispense error', e);
     return res.status(500).json({ error: 'No se pudo iniciar el dispensado' });
   }
@@ -446,6 +726,7 @@ router.post('/complete', requireAuth, async (req, res) => {
 
     if (existing.status === 'COMPLETED') {
       const wallet = await prisma.wallet.findUnique({ where: { userId } });
+      await releaseMachineLock(existing.machineId, userId);
       return res.json({
         ok: true,
         alreadyCompleted: true,
@@ -533,6 +814,8 @@ router.post('/complete', requireAuth, async (req, res) => {
         console.error('[Dispense] Error enviando notificacion', errNotif);
       });
     }
+
+    await releaseMachineLock(existing.machineId, userId);
 
     return res.json({
       ok: true,
@@ -651,9 +934,24 @@ router.get('/quote', (req, res) => {
 router.post('/demo/control', requireAuth, async (req, res) => {
   try {
     const action = String(req.body?.action || '').trim().toLowerCase();
+    const machineId = normalizeMachineId(req.body?.machineId);
+    const hardwareId = normalizeHardwareId(req.body?.hardwareId);
+    const { userId } = req.auth;
+
+    await ensureUserAndWallet(userId);
+    if (action === 'qr_inicio') {
+      await acquireMachineLock(machineId, userId, { hardwareId });
+    } else if (action !== 'inputs' && action !== 'recarga_monedas') {
+      await requireMachineLockOwner(machineId, userId, { hardwareId });
+    }
+
     const out = await sendDemoAction(action, req.body?.pulsesPerLiter);
     return res.json({ ok: true, ...out });
   } catch (e) {
+    if (e.code === 'MACHINE_BUSY') {
+      return sendMachineBusy(res, e);
+    }
+
     if (e.statusCode === 400) {
       return res.status(400).json({
         error: e.message,
@@ -682,6 +980,14 @@ router.get('/demo/monitor', requireAuth, async (_req, res) => {
       error: 'No se pudo escuchar el monitor waterserver',
       detail: e.message,
     });
+  }
+});
+
+setImmediate(() => {
+  try {
+    ensureMonitorConnection();
+  } catch (error) {
+    console.error('[Dispense] No se pudo iniciar monitor automatico', error);
   }
 });
 
