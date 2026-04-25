@@ -109,14 +109,7 @@ function sanitizePulsesPerLiter(value, fallback = DEFAULT_PULSES_PER_LITER) {
   return Math.min(parsed, 65535);
 }
 
-function commandSupportsPulsePayload(command) {
-  return String(command || '').trim().toUpperCase() === '13';
-}
-
 function buildControlCommandLine(command, pulsesPerLiter) {
-  if (!commandSupportsPulsePayload(command)) {
-    return String(command || '').trim().toUpperCase();
-  }
   const pulses = sanitizePulsesPerLiter(pulsesPerLiter);
   return `${String(command || '').trim().toUpperCase()} ${pulses}`;
 }
