@@ -109,9 +109,16 @@ function sanitizePulsesPerLiter(value, fallback = DEFAULT_PULSES_PER_LITER) {
   return Math.min(parsed, 65535);
 }
 
+function commandSupportsPulsePayload(command) {
+  return new Set(['10', '11', '12', '13', '14', '15']).has(String(command || '').trim().toUpperCase());
+}
+
 function buildControlCommandLine(command, pulsesPerLiter) {
+  if (!commandSupportsPulsePayload(command)) {
+    return String(command || '').trim().toUpperCase();
+  }
   const pulses = sanitizePulsesPerLiter(pulsesPerLiter);
-  return `${command} ${pulses}`;
+  return `${String(command || '').trim().toUpperCase()} ${pulses}`;
 }
 
 function monitorPort() {

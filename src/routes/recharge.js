@@ -314,9 +314,11 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
     const accumulatedAmount = Number.parseInt(req.body?.accumulatedAmount, 10);
     const pulseCount = Number.parseInt(req.body?.pulseCount, 10);
     const rawFrame = typeof req.body?.rawFrame === 'string' ? req.body.rawFrame.trim().slice(0, 255) : null;
+    const hasInsertedAmount = Number.isFinite(insertedAmount) && insertedAmount >= 0;
+    const hasAccumulatedAmount = Number.isFinite(accumulatedAmount) && accumulatedAmount >= 0;
 
-    if (!Number.isFinite(insertedAmount) || insertedAmount < 0) {
-      return res.status(400).json({ error: 'insertedAmount invalido' });
+    if (!hasInsertedAmount && !hasAccumulatedAmount) {
+      return res.status(400).json({ error: 'insertedAmount/acumulatedAmount invalidos' });
     }
 
     await ensureUserAndWallet({ userId, email, name });
@@ -334,11 +336,10 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
         },
       });
 
-      const hasAccumulatedAmount = Number.isFinite(accumulatedAmount) && accumulatedAmount >= 0;
       const accumulatedCents = hasAccumulatedAmount
         ? accumulatedAmount * 100
         : checkpoint.lastAmountCents;
-      const insertedCents = insertedAmount > 0 ? insertedAmount * 100 : 0;
+      const insertedCents = hasInsertedAmount && insertedAmount > 0 ? insertedAmount * 100 : 0;
 
       if (rawFrame && checkpoint.lastFrame === rawFrame) {
         const wallet = await tx.wallet.findUnique({ where: { userId } });
@@ -346,7 +347,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
           creditedCents: 0,
           creditedPesos: 0,
           balanceCents: wallet?.balanceCents ?? 0,
-          insertedAmount,
+          insertedAmount: hasInsertedAmount ? insertedAmount : 0,
           accumulatedAmount: accumulatedCents / 100,
           pulseCount,
           machineId,
@@ -370,8 +371,8 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
           creditedCents: 0,
           creditedPesos: 0,
           balanceCents: wallet?.balanceCents ?? 0,
-          insertedAmount,
-          accumulatedAmount,
+          insertedAmount: hasInsertedAmount ? insertedAmount : 0,
+          accumulatedAmount: hasAccumulatedAmount ? accumulatedAmount : accumulatedCents / 100,
           previousAccumulatedAmount: checkpoint.lastAmountCents / 100,
           pulseCount,
           previousPulseCount: checkpoint.lastPulseCount ?? 0,
@@ -398,8 +399,8 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
           creditedCents: 0,
           creditedPesos: 0,
           balanceCents: wallet?.balanceCents ?? 0,
-          insertedAmount,
-          accumulatedAmount,
+          insertedAmount: hasInsertedAmount ? insertedAmount : 0,
+          accumulatedAmount: hasAccumulatedAmount ? accumulatedAmount : accumulatedCents / 100,
           previousAccumulatedAmount: checkpoint.lastAmountCents / 100,
           pulseCount,
           previousPulseCount: checkpoint.lastPulseCount ?? 0,
@@ -441,8 +442,8 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
         creditedCents,
         creditedPesos,
         balanceCents: wallet.balanceCents,
-        insertedAmount,
-        accumulatedAmount,
+        insertedAmount: hasInsertedAmount ? insertedAmount : 0,
+        accumulatedAmount: hasAccumulatedAmount ? accumulatedAmount : accumulatedCents / 100,
         previousAccumulatedAmount: checkpoint.lastAmountCents / 100,
         pulseCount,
         previousPulseCount: checkpoint.lastPulseCount ?? 0,
