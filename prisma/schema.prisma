@@ -153,14 +153,16 @@ model TelemetryCreditCheckpoint {
 }
 
 model MachineLock {
-  machineId  String   @id
-  hardwareId String?
-  userId     String
-  txId       String?
-  expiresAt  DateTime
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-  user       User     @relation(fields: [userId], references: [id])
+  machineId       String   @id
+  machineLocation String?
+  hardwareId      String?
+  userId          String
+  txId            String?
+  selectedLiters  Float?
+  expiresAt       DateTime
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  user            User     @relation(fields: [userId], references: [id])
 
   @@index([userId])
   @@index([hardwareId])

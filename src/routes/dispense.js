@@ -115,6 +115,14 @@ async function acquireMachineLock(machineIdValue, userId, options = {}) {
   const hardwareId = options.hardwareId === undefined
     ? undefined
     : normalizeHardwareId(options.hardwareId);
+  const machineLocation = options.machineLocation === undefined
+    ? undefined
+    : String(options.machineLocation || '').trim() || null;
+  const selectedLiters = options.selectedLiters === undefined
+    ? undefined
+    : Number(options.selectedLiters);
+  const safeSelectedLiters =
+    Number.isFinite(selectedLiters) && selectedLiters > 0 ? selectedLiters : null;
 
   const existing = await prisma.machineLock.findUnique({ where: { machineId } });
   if (existing && existing.expiresAt > now && existing.userId !== userId) {
@@ -129,6 +137,8 @@ async function acquireMachineLock(machineIdValue, userId, options = {}) {
         expiresAt,
         ...(txId !== undefined ? { txId } : {}),
         ...(hardwareId !== undefined ? { hardwareId } : {}),
+        ...(machineLocation !== undefined ? { machineLocation } : {}),
+        ...(options.selectedLiters !== undefined ? { selectedLiters: safeSelectedLiters } : {}),
       },
       create: {
         machineId,
@@ -136,6 +146,8 @@ async function acquireMachineLock(machineIdValue, userId, options = {}) {
         expiresAt,
         ...(txId !== undefined ? { txId } : {}),
         ...(hardwareId !== undefined ? { hardwareId } : {}),
+        ...(machineLocation !== undefined ? { machineLocation } : {}),
+        ...(options.selectedLiters !== undefined ? { selectedLiters: safeSelectedLiters } : {}),
       },
     });
   } catch (error) {
@@ -164,6 +176,8 @@ async function requireMachineLockOwner(machineIdValue, userId, options = {}) {
   return acquireMachineLock(machineId, userId, {
     txId: lock.txId,
     hardwareId: options.hardwareId ?? lock.hardwareId,
+    machineLocation: options.machineLocation ?? lock.machineLocation,
+    selectedLiters: options.selectedLiters ?? lock.selectedLiters,
   });
 }
 
@@ -181,6 +195,26 @@ function sendMachineBusy(res, error) {
     expiresAt: error.expiresAt,
     isOwnLock: Boolean(error.isOwnLock),
   });
+}
+
+function litersFromAction(action) {
+  switch (action) {
+    case 'litros_5':
+      return 5;
+    case 'litros_10':
+      return 10;
+    case 'litros_20':
+      return 20;
+    default:
+      return undefined;
+  }
+}
+
+function activePathForStage(stageCode, hasTx) {
+  if (hasTx || stageCode === '06' || stageCode === '07') return '/filling-progress';
+  if (stageCode === '03' || stageCode === '04') return '/water/position-down';
+  if (stageCode === '05') return '/water/position-up';
+  return '/water/choose';
 }
 
 async function completeStartedDispense(existing, source = 'api') {
@@ -641,7 +675,11 @@ router.post('/', requireAuth, async (req, res) => {
     const safeMachineId = normalizeMachineId(machineId);
 
     await ensureUserAndWallet(userId);
-    await requireMachineLockOwner(safeMachineId, userId, { hardwareId });
+    await requireMachineLockOwner(safeMachineId, userId, {
+      hardwareId,
+      machineLocation: location,
+      selectedLiters: ltrs,
+    });
 
     const wallet = await prisma.wallet.findUnique({ where: { userId } });
     if (!wallet) {
@@ -675,7 +713,12 @@ router.post('/', requireAuth, async (req, res) => {
       },
     });
 
-    await acquireMachineLock(safeMachineId, userId, { txId: dispense.id, hardwareId });
+    await acquireMachineLock(safeMachineId, userId, {
+      txId: dispense.id,
+      hardwareId,
+      machineLocation: location,
+      selectedLiters: ltrs,
+    });
 
     return res.json({
       ok: true,
@@ -908,6 +951,69 @@ router.get('/config', (_req, res) => {
 });
 
 /* ----------------------------------------------------------------------------- */
+/* GET /api/dispense/active                                                      */
+/* ----------------------------------------------------------------------------- */
+router.get('/active', requireAuth, async (req, res) => {
+  try {
+    const { userId } = req.auth;
+    const now = new Date();
+    const lock = await prisma.machineLock.findFirst({
+      where: {
+        userId,
+        expiresAt: { gt: now },
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    if (!lock) {
+      return res.json({ ok: true, active: false });
+    }
+
+    const stageCode = parseMonitorTelemetry(monitorState.latestFrame?.response)?.currentStageCode || null;
+    const dispense = lock.txId
+      ? await prisma.dispense.findFirst({
+          where: { id: lock.txId, userId },
+        })
+      : null;
+    const pricePerLiter = PRICE_PER_LITER_CENTS / 100;
+    const selectedLiters = dispense?.liters ?? lock.selectedLiters ?? LITERS_FULL;
+    const tx = dispense
+      ? {
+          at: dispense.createdAt?.getTime?.() || Date.now(),
+          completedAt: dispense.updatedAt?.getTime?.() || undefined,
+          liters: dispense.liters,
+          pricePerLiter,
+          amountCents: dispense.totalCents,
+          prevBalanceCents: undefined,
+          newBalanceCents: undefined,
+          machineId: dispense.machineId || lock.machineId,
+          location: dispense.machineLocation || lock.machineLocation || undefined,
+          startPulseCount: 0,
+          pulsesPerLiter: DEFAULT_PULSES_PER_LITER,
+          txId: dispense.id,
+          status: dispense.status,
+        }
+      : null;
+
+    return res.json({
+      ok: true,
+      active: true,
+      machineId: lock.machineId,
+      machineLocation: lock.machineLocation,
+      hardwareId: lock.hardwareId,
+      selectedLiters,
+      stageCode,
+      tx,
+      nextPath: activePathForStage(stageCode, Boolean(tx)),
+      expiresAt: lock.expiresAt,
+    });
+  } catch (e) {
+    console.error('GET /api/dispense/active error', e);
+    return res.status(500).json({ error: 'No se pudo consultar la sesion activa' });
+  }
+});
+
+/* ----------------------------------------------------------------------------- */
 /* GET /api/dispense/quote?liters=10  (pública)                                  */
 /* ----------------------------------------------------------------------------- */
 router.get('/quote', (req, res) => {
@@ -940,9 +1046,16 @@ router.post('/demo/control', requireAuth, async (req, res) => {
 
     await ensureUserAndWallet(userId);
     if (action === 'qr_inicio') {
-      await acquireMachineLock(machineId, userId, { hardwareId });
+      await acquireMachineLock(machineId, userId, {
+        hardwareId,
+        machineLocation: req.body?.machineLocation,
+      });
     } else if (action !== 'inputs' && action !== 'recarga_monedas') {
-      await requireMachineLockOwner(machineId, userId, { hardwareId });
+      await requireMachineLockOwner(machineId, userId, {
+        hardwareId,
+        machineLocation: req.body?.machineLocation,
+        selectedLiters: litersFromAction(action),
+      });
     }
 
     const out = await sendDemoAction(action, req.body?.pulsesPerLiter);

@@ -1,8 +1,10 @@
 CREATE TABLE "MachineLock" (
     "machineId" TEXT NOT NULL,
+    "machineLocation" TEXT,
     "hardwareId" TEXT,
     "userId" TEXT NOT NULL,
     "txId" TEXT,
+    "selectedLiters" DOUBLE PRECISION,
     "expiresAt" TIMESTAMP(3) NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
