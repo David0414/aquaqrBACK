@@ -110,7 +110,7 @@ function sanitizePulsesPerLiter(value, fallback = DEFAULT_PULSES_PER_LITER) {
 }
 
 function commandSupportsPulsePayload(command) {
-  return new Set(['10', '11', '12', '13', '14', '15']).has(String(command || '').trim().toUpperCase());
+  return String(command || '').trim().toUpperCase() === '13';
 }
 
 function buildControlCommandLine(command, pulsesPerLiter) {
