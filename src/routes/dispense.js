@@ -1131,6 +1131,58 @@ router.get('/active', requireAuth, async (req, res) => {
 });
 
 /* ----------------------------------------------------------------------------- */
+/* POST /api/dispense/active/cancel                                              */
+/* Cancela una reserva preparatoria y reinicia la maquina a espera.              */
+/* ----------------------------------------------------------------------------- */
+router.post('/active/cancel', requireAuth, async (req, res) => {
+  try {
+    const { userId } = req.auth;
+    const now = new Date();
+    const lock = await prisma.machineLock.findFirst({
+      where: {
+        userId,
+        expiresAt: { gt: now },
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    if (!lock) {
+      return res.json({ ok: true, active: false });
+    }
+
+    if (lock.txId) {
+      const dispense = await prisma.dispense.findFirst({
+        where: { id: lock.txId, userId },
+      });
+      if (dispense?.status === 'STARTED') {
+        return res.status(409).json({
+          error: 'DISPENSE_ALREADY_STARTED',
+          message: 'El llenado ya inicio. Espera a que termine para generar el ticket.',
+        });
+      }
+    }
+
+    await enqueueControlCommand(
+      buildControlCommandLine(DEMO_ACTION_TO_COMMAND.reiniciar_sistema, DEFAULT_PULSES_PER_LITER)
+    );
+    await releaseMachineLock(lock.machineId, userId);
+
+    return res.json({
+      ok: true,
+      active: false,
+      machineId: lock.machineId,
+      resetSent: true,
+    });
+  } catch (e) {
+    console.error('POST /api/dispense/active/cancel error', e);
+    return res.status(e.statusCode || 500).json({
+      error: e.code || 'ACTIVE_CANCEL_FAILED',
+      message: e.message || 'No se pudo cancelar la sesion activa',
+    });
+  }
+});
+
+/* ----------------------------------------------------------------------------- */
 /* GET /api/dispense/quote?liters=10  (pública)                                  */
 /* ----------------------------------------------------------------------------- */
 router.get('/quote', (req, res) => {
