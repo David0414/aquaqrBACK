@@ -28,6 +28,7 @@ const PRICE_PER_LITER_CENTS = Number.isFinite(ENV_PPL)
   : Math.round(PRICE_PER_GARRAFON_CENTS / GARRAFON_LITERS);
 const DEFAULT_PULSES_PER_LITER = intFromEnv('FLOWMETER_PULSES_PER_LITER', 360);
 const MACHINE_LOCK_TTL_MS = intFromEnv('MACHINE_LOCK_TTL_MS', 20 * 60 * 1000);
+const IDLE_LOCK_RELEASE_MS = intFromEnv('IDLE_LOCK_RELEASE_MS', 8000);
 const SINGLE_MACHINE_MODE = String(process.env.SINGLE_MACHINE_MODE || 'true').toLowerCase() !== 'false';
 const DEFAULT_MACHINE_HARDWARE_ID = normalizeHardwareId(process.env.DEFAULT_MACHINE_HARDWARE_ID || '01');
 
@@ -500,6 +501,10 @@ const monitorState = {
   connecting: false,
 };
 const autoCompleteInFlight = new Set();
+const idleTelemetryState = {
+  stageCode: null,
+  startedAt: 0,
+};
 
 function isMonitorFrameLine(line) {
   return /E2[\s:-]?[0-9A-F]{2}/i.test(line) && /E3/i.test(line);
@@ -520,6 +525,9 @@ function parseMonitorTelemetry(line) {
   return {
     machineHardwareId: normalizeHardwareId(bytes[1]),
     currentStageCode: normalizeHardwareId(bytes[9]) || '00',
+    fillValveOn: normalizeHardwareId(bytes[6]) !== '00',
+    rinseValveOn: normalizeHardwareId(bytes[7]) !== '00',
+    pumpOn: normalizeHardwareId(bytes[8]) !== '00',
     rawFrame: bytes.join('-'),
   };
 }
@@ -557,6 +565,9 @@ function handleMonitorLine(line) {
 
   maybeCompleteDispenseFromTelemetry(parsed).catch((error) => {
     console.error('[Dispense] Error en cierre automatico por telemetria', error);
+  });
+  maybeReleaseIdlePreparatoryLocks(parsed).catch((error) => {
+    console.error('[Dispense] Error liberando reserva idle', error);
   });
 }
 
@@ -689,6 +700,47 @@ async function maybeCompleteDispenseFromTelemetry(parsed) {
     }
   } finally {
     autoCompleteInFlight.delete(lock.txId);
+  }
+}
+
+async function maybeReleaseIdlePreparatoryLocks(parsed) {
+  if (!parsed) return;
+
+  const isIdle =
+    parsed.currentStageCode === '00'
+    && !parsed.pumpOn
+    && !parsed.fillValveOn
+    && !parsed.rinseValveOn;
+
+  if (!isIdle) {
+    idleTelemetryState.stageCode = parsed.currentStageCode;
+    idleTelemetryState.startedAt = 0;
+    return;
+  }
+
+  const nowMs = Date.now();
+  if (idleTelemetryState.stageCode !== '00' || !idleTelemetryState.startedAt) {
+    idleTelemetryState.stageCode = '00';
+    idleTelemetryState.startedAt = nowMs;
+    return;
+  }
+
+  if (nowMs - idleTelemetryState.startedAt < IDLE_LOCK_RELEASE_MS) return;
+
+  const now = new Date();
+  const where = {
+    txId: null,
+    expiresAt: { gt: now },
+    ...(SINGLE_MACHINE_MODE
+      ? {}
+      : parsed.machineHardwareId
+        ? { hardwareId: parsed.machineHardwareId }
+        : {}),
+  };
+
+  const result = await prisma.machineLock.deleteMany({ where });
+  if (result.count > 0) {
+    console.log(`[Dispense] Reserva preparatoria liberada por maquina idle (${result.count})`);
   }
 }
 
