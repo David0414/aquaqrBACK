@@ -28,6 +28,8 @@ const PRICE_PER_LITER_CENTS = Number.isFinite(ENV_PPL)
   : Math.round(PRICE_PER_GARRAFON_CENTS / GARRAFON_LITERS);
 const DEFAULT_PULSES_PER_LITER = intFromEnv('FLOWMETER_PULSES_PER_LITER', 360);
 const MACHINE_LOCK_TTL_MS = intFromEnv('MACHINE_LOCK_TTL_MS', 20 * 60 * 1000);
+const SINGLE_MACHINE_MODE = String(process.env.SINGLE_MACHINE_MODE || 'true').toLowerCase() !== 'false';
+const DEFAULT_MACHINE_HARDWARE_ID = normalizeHardwareId(process.env.DEFAULT_MACHINE_HARDWARE_ID || '01');
 
 // Opciones de litros: 1/4, 1/2 y completo.
 const LITERS_QUARTER = Math.round((GARRAFON_LITERS / 4) * 10) / 10; // ej. 5.0
@@ -87,6 +89,10 @@ function normalizeHardwareId(value) {
   return hardwareId.padStart(2, '0').slice(-2);
 }
 
+function effectiveHardwareId(value) {
+  return normalizeHardwareId(value) || (SINGLE_MACHINE_MODE ? DEFAULT_MACHINE_HARDWARE_ID : null);
+}
+
 function machineLockExpiresAt() {
   return new Date(Date.now() + MACHINE_LOCK_TTL_MS);
 }
@@ -101,6 +107,9 @@ async function findMachineLockConflict(machineId, hardwareId, userId) {
 
   if (machineId) where.push({ machineId });
   if (hardwareId) where.push({ hardwareId });
+  if (SINGLE_MACHINE_MODE) {
+    where.push({});
+  }
   if (where.length === 0) return null;
 
   const locks = await prisma.machineLock.findMany({
@@ -117,6 +126,9 @@ async function findOwnMachineLock(machineId, hardwareId, userId) {
 
   if (machineId) where.push({ machineId });
   if (hardwareId) where.push({ hardwareId });
+  if (SINGLE_MACHINE_MODE) {
+    where.push({});
+  }
   if (where.length === 0) return null;
 
   const locks = await prisma.machineLock.findMany({
@@ -147,8 +159,8 @@ function throwMachineBusy(lock, userId) {
 async function acquireMachineLock(machineIdValue, userId, options = {}) {
   const machineId = normalizeMachineId(machineIdValue);
   const hardwareId = options.hardwareId === undefined
-    ? undefined
-    : normalizeHardwareId(options.hardwareId);
+    ? (SINGLE_MACHINE_MODE ? DEFAULT_MACHINE_HARDWARE_ID : undefined)
+    : effectiveHardwareId(options.hardwareId);
   if (!machineId && !hardwareId) return null;
 
   const now = new Date();
@@ -205,7 +217,7 @@ async function acquireMachineLock(machineIdValue, userId, options = {}) {
 
 async function requireMachineLockOwner(machineIdValue, userId, options = {}) {
   const machineId = normalizeMachineId(machineIdValue);
-  const hardwareId = normalizeHardwareId(options.hardwareId);
+  const hardwareId = effectiveHardwareId(options.hardwareId);
   if (!machineId && !hardwareId) return null;
 
   const now = new Date();
