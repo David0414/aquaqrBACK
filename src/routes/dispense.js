@@ -1087,6 +1087,11 @@ router.get('/active', requireAuth, async (req, res) => {
           where: { id: lock.txId, userId },
         })
       : null;
+    if (dispense?.status === 'COMPLETED') {
+      await releaseMachineLock(lock.machineId, userId);
+      return res.json({ ok: true, active: false });
+    }
+
     const pricePerLiter = PRICE_PER_LITER_CENTS / 100;
     const selectedLiters = dispense?.liters ?? lock.selectedLiters ?? LITERS_FULL;
     const tx = dispense
