@@ -31,6 +31,8 @@ const MACHINE_LOCK_TTL_MS = intFromEnv('MACHINE_LOCK_TTL_MS', 20 * 60 * 1000);
 const IDLE_LOCK_RELEASE_MS = intFromEnv('IDLE_LOCK_RELEASE_MS', 8000);
 const SINGLE_MACHINE_MODE = String(process.env.SINGLE_MACHINE_MODE || 'true').toLowerCase() !== 'false';
 const DEFAULT_MACHINE_HARDWARE_ID = normalizeHardwareId(process.env.DEFAULT_MACHINE_HARDWARE_ID || '01');
+const MONITOR_ADMIN_USER = process.env.MONITOR_ADMIN_USER || 'admin';
+const MONITOR_ADMIN_PASSWORD = process.env.MONITOR_ADMIN_PASSWORD || '123';
 
 // Opciones de litros: 1/4, 1/2 y completo.
 const LITERS_QUARTER = Math.round((GARRAFON_LITERS / 4) * 10) / 10; // ej. 5.0
@@ -77,6 +79,21 @@ async function ensureUserAndWallet(userId) {
 function totalForLiters(ltrs) {
   // total en centavos, entero
   return Math.round(ltrs * PRICE_PER_LITER_CENTS);
+}
+
+function isMonitorAdminRequest(req) {
+  const user = String(req.headers['x-monitor-user'] || '').trim();
+  const password = String(req.headers['x-monitor-password'] || '').trim();
+  return user === MONITOR_ADMIN_USER && password === MONITOR_ADMIN_PASSWORD;
+}
+
+function requireAuthOrMonitorAdmin(req, res, next) {
+  if (isMonitorAdminRequest(req)) {
+    req.auth = { userId: 'agua24-monitor-admin', monitorAdmin: true };
+    return next();
+  }
+
+  return requireAuth(req, res, next);
 }
 
 function normalizeMachineId(value) {
@@ -1206,7 +1223,7 @@ router.get('/quote', (req, res) => {
 /* POST /api/dispense/demo/control                                               */
 /* Body: { action: 'bomba_on' | ... }                                            */
 /* ----------------------------------------------------------------------------- */
-router.post('/demo/control', requireAuth, async (req, res) => {
+router.post('/demo/control', requireAuthOrMonitorAdmin, async (req, res) => {
   try {
     const action = String(req.body?.action || '').trim().toLowerCase();
     const machineId = normalizeMachineId(req.body?.machineId);
@@ -1248,7 +1265,7 @@ router.post('/demo/control', requireAuth, async (req, res) => {
   }
 });
 
-router.get('/demo/monitor', requireAuth, async (_req, res) => {
+router.get('/demo/monitor', requireAuthOrMonitorAdmin, async (_req, res) => {
   try {
     const out = await readMonitorFrame();
     return res.json({
