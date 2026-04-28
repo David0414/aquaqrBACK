@@ -27,6 +27,7 @@ const PRICE_PER_LITER_CENTS = Number.isFinite(ENV_PPL)
   ? ENV_PPL
   : Math.round(PRICE_PER_GARRAFON_CENTS / GARRAFON_LITERS);
 const DEFAULT_PULSES_PER_LITER = intFromEnv('FLOWMETER_PULSES_PER_LITER', 360);
+let currentPulsesPerLiter = DEFAULT_PULSES_PER_LITER;
 const MACHINE_LOCK_TTL_MS = intFromEnv('MACHINE_LOCK_TTL_MS', 20 * 60 * 1000);
 const IDLE_LOCK_RELEASE_MS = intFromEnv('IDLE_LOCK_RELEASE_MS', 8000);
 const SINGLE_MACHINE_MODE = String(process.env.SINGLE_MACHINE_MODE || 'true').toLowerCase() !== 'false';
@@ -506,8 +507,13 @@ function sanitizePulsesPerLiter(value, fallback = DEFAULT_PULSES_PER_LITER) {
   return Math.min(parsed, 65535);
 }
 
+function updateCurrentPulsesPerLiter(value) {
+  currentPulsesPerLiter = sanitizePulsesPerLiter(value, currentPulsesPerLiter);
+  return currentPulsesPerLiter;
+}
+
 function buildControlCommandLine(command, pulsesPerLiter) {
-  const pulses = sanitizePulsesPerLiter(pulsesPerLiter);
+  const pulses = sanitizePulsesPerLiter(pulsesPerLiter, currentPulsesPerLiter);
   return `${String(command || '').trim().toUpperCase()} ${pulses}`;
 }
 
@@ -868,7 +874,7 @@ async function sendDemoAction(action, pulsesPerLiter) {
     throw error;
   }
 
-  const safePulsesPerLiter = sanitizePulsesPerLiter(pulsesPerLiter);
+  const safePulsesPerLiter = updateCurrentPulsesPerLiter(pulsesPerLiter);
   const commandLine = buildControlCommandLine(command, safePulsesPerLiter);
   const out = await enqueueControlCommand(commandLine);
   return {
@@ -1172,8 +1178,19 @@ router.get('/config', (_req, res) => {
     garrafonLiters: GARRAFON_LITERS,
     pricePerGarrafonCents: PRICE_PER_GARRAFON_CENTS,
     pricePerLiterCents: PRICE_PER_LITER_CENTS,
+    defaultPulsesPerLiter: DEFAULT_PULSES_PER_LITER,
+    pulsesPerLiter: currentPulsesPerLiter,
     optionsLiters,
     allowedLiters: optionsLiters,
+  });
+});
+
+router.post('/config/pulses', requireAuthOrMonitorAdmin, (req, res) => {
+  const pulsesPerLiter = updateCurrentPulsesPerLiter(req.body?.pulsesPerLiter);
+  return res.json({
+    ok: true,
+    pulsesPerLiter,
+    defaultPulsesPerLiter: DEFAULT_PULSES_PER_LITER,
   });
 });
 
@@ -1265,7 +1282,7 @@ router.post('/active/cancel', requireAuth, async (req, res) => {
       return res.json({ ok: true, active: false });
     }
 
-    const safePulsesPerLiter = sanitizePulsesPerLiter(req.body?.pulsesPerLiter);
+    const safePulsesPerLiter = updateCurrentPulsesPerLiter(req.body?.pulsesPerLiter);
     if (lock.txId) cancelInFlight.add(lock.txId);
 
     let cancelResult = null;
