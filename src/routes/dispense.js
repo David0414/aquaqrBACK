@@ -376,6 +376,102 @@ async function completeStartedDispense(existing, source = 'api') {
   return { completed: true, ...result };
 }
 
+async function cancelStartedDispense(existing, source = 'api') {
+  if (!existing) {
+    return { canceled: false, reason: 'missing-dispense' };
+  }
+
+  if (existing.status === 'CANCELED') {
+    const wallet = await prisma.wallet.findUnique({ where: { userId: existing.userId } });
+    return {
+      canceled: false,
+      alreadyCanceled: true,
+      status: existing.status,
+      balanceCents: wallet?.balanceCents,
+    };
+  }
+
+  if (existing.status === 'COMPLETED') {
+    const wallet = await prisma.wallet.findUnique({ where: { userId: existing.userId } });
+    return {
+      canceled: false,
+      alreadyCompleted: true,
+      status: existing.status,
+      balanceCents: wallet?.balanceCents,
+    };
+  }
+
+  if (existing.status !== 'STARTED') {
+    return { canceled: false, reason: `status-${existing.status}`, status: existing.status };
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const claimed = await tx.dispense.updateMany({
+      where: { id: existing.id, userId: existing.userId, status: 'STARTED' },
+      data: { status: 'CANCELED' },
+    });
+
+    if (claimed.count !== 1) {
+      const current = await tx.dispense.findUnique({ where: { id: existing.id } });
+      return {
+        canceled: false,
+        alreadyCanceled: current?.status === 'CANCELED',
+        alreadyCompleted: current?.status === 'COMPLETED',
+        status: current?.status,
+      };
+    }
+
+    let refundedCents = 0;
+    let balanceCents;
+    const debitExternalId = `DISPENSE:${existing.id}`;
+    const refundExternalId = `DISPENSE_CANCEL:${existing.id}`;
+    const postedDebit = await tx.ledgerEntry.findUnique({
+      where: { externalId: debitExternalId },
+    });
+
+    if (postedDebit?.type === 'DEBIT' && postedDebit.status === 'POSTED') {
+      const existingRefund = await tx.ledgerEntry.findUnique({
+        where: { externalId: refundExternalId },
+      });
+
+      if (!existingRefund) {
+        const updatedWallet = await tx.wallet.update({
+          where: { userId: existing.userId },
+          data: { balanceCents: { increment: postedDebit.amountCents } },
+        });
+        await tx.ledgerEntry.create({
+          data: {
+            userId: existing.userId,
+            type: 'CREDIT',
+            amountCents: postedDebit.amountCents,
+            currency: existing.currency,
+            description: `Cancelacion de dispensado - ${existing.liters}L`,
+            source: `DISPENSE_CANCEL:${existing.id}`,
+            externalId: refundExternalId,
+            status: 'POSTED',
+          },
+        });
+        refundedCents = postedDebit.amountCents;
+        balanceCents = updatedWallet.balanceCents;
+      }
+    }
+
+    if (balanceCents === undefined) {
+      const wallet = await tx.wallet.findUnique({ where: { userId: existing.userId } });
+      balanceCents = wallet?.balanceCents;
+    }
+
+    console.log(`[Dispense] Dispensado cancelado (${source}): ${existing.id}`);
+    return {
+      canceled: true,
+      status: 'CANCELED',
+      txId: existing.id,
+      refundedCents,
+      balanceCents,
+    };
+  });
+}
+
 function mapDispenseStatus(s) {
   switch (s) {
     case 'STARTED':
@@ -518,6 +614,7 @@ const monitorState = {
   connecting: false,
 };
 const autoCompleteInFlight = new Set();
+const cancelInFlight = new Set();
 const idleTelemetryState = {
   stageCode: null,
   startedAt: 0,
@@ -695,6 +792,7 @@ async function maybeCompleteDispenseFromTelemetry(parsed) {
 
   const lock = await findLockForTelemetry(parsed.machineHardwareId);
   if (!lock?.txId) return;
+  if (cancelInFlight.has(lock.txId)) return;
   if (autoCompleteInFlight.has(lock.txId)) return;
 
   autoCompleteInFlight.add(lock.txId);
@@ -1104,7 +1202,7 @@ router.get('/active', requireAuth, async (req, res) => {
           where: { id: lock.txId, userId },
         })
       : null;
-    if (dispense?.status === 'COMPLETED') {
+    if (dispense?.status === 'COMPLETED' || dispense?.status === 'CANCELED' || dispense?.status === 'FAILED') {
       await releaseMachineLock(lock.machineId, userId);
       return res.json({ ok: true, active: false });
     }
@@ -1149,7 +1247,7 @@ router.get('/active', requireAuth, async (req, res) => {
 
 /* ----------------------------------------------------------------------------- */
 /* POST /api/dispense/active/cancel                                              */
-/* Cancela una reserva preparatoria y reinicia la maquina a espera.              */
+/* Cancela la sesion activa y reinicia la maquina a espera.                     */
 /* ----------------------------------------------------------------------------- */
 router.post('/active/cancel', requireAuth, async (req, res) => {
   try {
@@ -1167,28 +1265,37 @@ router.post('/active/cancel', requireAuth, async (req, res) => {
       return res.json({ ok: true, active: false });
     }
 
-    if (lock.txId) {
-      const dispense = await prisma.dispense.findFirst({
-        where: { id: lock.txId, userId },
-      });
-      if (dispense?.status === 'STARTED') {
-        return res.status(409).json({
-          error: 'DISPENSE_ALREADY_STARTED',
-          message: 'El llenado ya inicio. Espera a que termine para generar el ticket.',
-        });
-      }
-    }
+    const safePulsesPerLiter = sanitizePulsesPerLiter(req.body?.pulsesPerLiter);
+    if (lock.txId) cancelInFlight.add(lock.txId);
 
-    await enqueueControlCommand(
-      buildControlCommandLine(DEMO_ACTION_TO_COMMAND.reiniciar_sistema, DEFAULT_PULSES_PER_LITER)
-    );
-    await releaseMachineLock(lock.machineId, userId);
+    let cancelResult = null;
+    try {
+      await enqueueControlCommand(
+        buildControlCommandLine(DEMO_ACTION_TO_COMMAND.reiniciar_sistema, safePulsesPerLiter)
+      );
+
+      if (lock.txId) {
+        const dispense = await prisma.dispense.findFirst({
+          where: { id: lock.txId, userId },
+        });
+        cancelResult = await cancelStartedDispense(dispense, 'user-cancel');
+      }
+
+      await releaseMachineLock(lock.machineId, userId);
+    } finally {
+      if (lock.txId) cancelInFlight.delete(lock.txId);
+    }
 
     return res.json({
       ok: true,
       active: false,
       machineId: lock.machineId,
       resetSent: true,
+      pulsesPerLiter: safePulsesPerLiter,
+      txId: lock.txId || undefined,
+      status: cancelResult?.status,
+      refundedCents: cancelResult?.refundedCents || 0,
+      balanceCents: cancelResult?.balanceCents,
     });
   } catch (e) {
     console.error('POST /api/dispense/active/cancel error', e);
@@ -1231,17 +1338,19 @@ router.post('/demo/control', requireAuthOrMonitorAdmin, async (req, res) => {
     const { userId } = req.auth;
 
     await ensureUserAndWallet(userId);
-    if (action === 'qr_inicio') {
-      await acquireMachineLock(machineId, userId, {
-        hardwareId,
-        machineLocation: req.body?.machineLocation,
-      });
-    } else if (action !== 'inputs' && action !== 'recarga_monedas') {
-      await requireMachineLockOwner(machineId, userId, {
-        hardwareId,
-        machineLocation: req.body?.machineLocation,
-        selectedLiters: litersFromAction(action),
-      });
+    if (!req.auth?.monitorAdmin) {
+      if (action === 'qr_inicio') {
+        await acquireMachineLock(machineId, userId, {
+          hardwareId,
+          machineLocation: req.body?.machineLocation,
+        });
+      } else if (action !== 'inputs' && action !== 'recarga_monedas') {
+        await requireMachineLockOwner(machineId, userId, {
+          hardwareId,
+          machineLocation: req.body?.machineLocation,
+          selectedLiters: litersFromAction(action),
+        });
+      }
     }
 
     const out = await sendDemoAction(action, req.body?.pulsesPerLiter);
