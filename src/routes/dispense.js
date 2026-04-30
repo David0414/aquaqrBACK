@@ -290,7 +290,7 @@ function litersFromAction(action) {
 }
 
 function activePathForStage(stageCode, hasTx) {
-  if (hasTx || stageCode === '06' || stageCode === '07') return '/filling-progress';
+  if (hasTx) return '/filling-progress';
   if (stageCode === '03' || stageCode === '04') return '/water/position-down';
   if (stageCode === '05') return '/water/position-up';
   return '/water/choose';
