@@ -611,6 +611,15 @@ function enqueueControlCommand(command) {
   return next;
 }
 
+function assertWaterserverAccepted(out) {
+  const responseText = String(out?.response || '').trim();
+  if (/^ERR\b/i.test(responseText)) {
+    const error = new Error(responseText.replace(/^ERR\s*/i, '') || 'Waterserver rechazo el comando');
+    error.statusCode = 502;
+    throw error;
+  }
+}
+
 const monitorState = {
   socket: null,
   buffer: '',
@@ -877,6 +886,7 @@ async function sendDemoAction(action, pulsesPerLiter) {
   const safePulsesPerLiter = updateCurrentPulsesPerLiter(pulsesPerLiter);
   const commandLine = buildControlCommandLine(command, safePulsesPerLiter);
   const out = await enqueueControlCommand(commandLine);
+  assertWaterserverAccepted(out);
   return {
     action,
     command,
@@ -931,7 +941,8 @@ router.post('/', requireAuth, async (req, res) => {
     // Inicia el llenado en el equipo, pero no descuenta saldo todavia.
     // El cobro se confirma cuando la telemetria reporta proceso finalizado.
     const safePulsesPerLiter = sanitizePulsesPerLiter(pulsesPerLiter);
-    await enqueueControlCommand(buildControlCommandLine(DEMO_ACTION_TO_COMMAND.inicio_dispensado, safePulsesPerLiter));
+    const commandOut = await enqueueControlCommand(buildControlCommandLine(DEMO_ACTION_TO_COMMAND.inicio_dispensado, safePulsesPerLiter));
+    assertWaterserverAccepted(commandOut);
 
     const dispense = await prisma.dispense.create({
       data: {
