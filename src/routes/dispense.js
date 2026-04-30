@@ -1224,6 +1224,11 @@ router.get('/active', requireAuth, async (req, res) => {
       return res.json({ ok: true, active: false });
     }
 
+    if (!lock.txId && stageCode === '00') {
+      await releaseMachineLock(lock.machineId, userId);
+      return res.json({ ok: true, active: false });
+    }
+
     const pricePerLiter = PRICE_PER_LITER_CENTS / 100;
     const selectedLiters = dispense?.liters ?? lock.selectedLiters ?? LITERS_FULL;
     const tx = dispense
