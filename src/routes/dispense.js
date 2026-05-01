@@ -34,6 +34,7 @@ const SINGLE_MACHINE_MODE = String(process.env.SINGLE_MACHINE_MODE || 'true').to
 const DEFAULT_MACHINE_HARDWARE_ID = normalizeHardwareId(process.env.DEFAULT_MACHINE_HARDWARE_ID || '01');
 const MONITOR_ADMIN_USER = process.env.MONITOR_ADMIN_USER || 'admin';
 const MONITOR_ADMIN_PASSWORD = process.env.MONITOR_ADMIN_PASSWORD || '123';
+const QR_INICIO_DEDUP_MS = intFromEnv('QR_INICIO_DEDUP_MS', 9000);
 
 // Opciones de litros: 1/4, 1/2 y completo.
 const LITERS_QUARTER = Math.round((GARRAFON_LITERS / 4) * 10) / 10; // ej. 5.0
@@ -603,6 +604,7 @@ function sendControlCommand(command) {
 }
 
 let controlQueue = Promise.resolve();
+const recentQrInicioByHardware = new Map();
 
 function enqueueControlCommand(command) {
   const run = () => sendControlCommand(command);
@@ -620,6 +622,21 @@ function assertWaterserverAccepted(out) {
   }
 }
 
+function qrInicioDedupKey(hardwareId) {
+  return effectiveHardwareId(hardwareId) || DEFAULT_MACHINE_HARDWARE_ID || 'single-machine';
+}
+
+function shouldSuppressDuplicateQrInicio(hardwareId) {
+  const key = qrInicioDedupKey(hardwareId);
+  const now = Date.now();
+  const previous = recentQrInicioByHardware.get(key) || 0;
+  if (now - previous < QR_INICIO_DEDUP_MS) {
+    return true;
+  }
+  recentQrInicioByHardware.set(key, now);
+  return false;
+}
+
 const monitorState = {
   socket: null,
   buffer: '',
@@ -630,6 +647,7 @@ const monitorState = {
 };
 const autoCompleteInFlight = new Set();
 const cancelInFlight = new Set();
+const activeCancelRequestsInFlight = new Map();
 const idleTelemetryState = {
   stageCode: null,
   startedAt: 0,
@@ -894,6 +912,15 @@ async function sendDemoAction(action, pulsesPerLiter) {
     pulsesPerLiter: safePulsesPerLiter,
     ...out,
   };
+}
+
+function activeCancelKey(lock) {
+  return [
+    lock?.userId || 'unknown-user',
+    lock?.txId || 'no-tx',
+    lock?.machineId || 'no-machine',
+    lock?.hardwareId || 'no-hardware',
+  ].join(':');
 }
 
 /* ----------------------------------------------------------------------------- */
@@ -1298,38 +1325,53 @@ router.post('/active/cancel', requireAuth, async (req, res) => {
       return res.json({ ok: true, active: false });
     }
 
-    const safePulsesPerLiter = updateCurrentPulsesPerLiter(req.body?.pulsesPerLiter);
-    if (lock.txId) cancelInFlight.add(lock.txId);
+    const requestKey = activeCancelKey(lock);
+    if (!activeCancelRequestsInFlight.has(requestKey)) {
+      activeCancelRequestsInFlight.set(requestKey, (async () => {
+        const safePulsesPerLiter = updateCurrentPulsesPerLiter(req.body?.pulsesPerLiter);
+        if (lock.txId) cancelInFlight.add(lock.txId);
 
-    let cancelResult = null;
-    try {
-      await enqueueControlCommand(
-        buildControlCommandLine(DEMO_ACTION_TO_COMMAND.reiniciar_sistema, safePulsesPerLiter)
-      );
+        let cancelResult = null;
+        try {
+          const resetOut = await enqueueControlCommand(
+            buildControlCommandLine(DEMO_ACTION_TO_COMMAND.reiniciar_sistema, safePulsesPerLiter)
+          );
+          assertWaterserverAccepted(resetOut);
 
-      if (lock.txId) {
-        const dispense = await prisma.dispense.findFirst({
-          where: { id: lock.txId, userId },
-        });
-        cancelResult = await cancelStartedDispense(dispense, 'user-cancel');
-      }
+          if (lock.txId) {
+            const dispense = await prisma.dispense.findFirst({
+              where: { id: lock.txId, userId },
+            });
+            cancelResult = await cancelStartedDispense(dispense, 'user-cancel');
+          }
 
-      await releaseMachineLock(lock.machineId, userId);
-    } finally {
-      if (lock.txId) cancelInFlight.delete(lock.txId);
+          await releaseMachineLock(lock.machineId, userId);
+        } finally {
+          if (lock.txId) cancelInFlight.delete(lock.txId);
+        }
+
+        return {
+          active: false,
+          machineId: lock.machineId,
+          resetSent: true,
+          pulsesPerLiter: safePulsesPerLiter,
+          txId: lock.txId || undefined,
+          status: cancelResult?.status,
+          refundedCents: cancelResult?.refundedCents || 0,
+          balanceCents: cancelResult?.balanceCents,
+        };
+      })());
     }
 
-    return res.json({
-      ok: true,
-      active: false,
-      machineId: lock.machineId,
-      resetSent: true,
-      pulsesPerLiter: safePulsesPerLiter,
-      txId: lock.txId || undefined,
-      status: cancelResult?.status,
-      refundedCents: cancelResult?.refundedCents || 0,
-      balanceCents: cancelResult?.balanceCents,
-    });
+    try {
+      const payload = await activeCancelRequestsInFlight.get(requestKey);
+      return res.json({
+        ok: true,
+        ...payload,
+      });
+    } finally {
+      activeCancelRequestsInFlight.delete(requestKey);
+    }
   } catch (e) {
     console.error('POST /api/dispense/active/cancel error', e);
     return res.status(e.statusCode || 500).json({
@@ -1384,6 +1426,17 @@ router.post('/demo/control', requireAuthOrMonitorAdmin, async (req, res) => {
           selectedLiters: litersFromAction(action),
         });
       }
+    }
+
+    if (action === 'qr_inicio' && shouldSuppressDuplicateQrInicio(hardwareId)) {
+      return res.json({
+        ok: true,
+        action,
+        command: DEMO_ACTION_TO_COMMAND[action],
+        commandLine: 'DUPLICATE_QR_INICIO_SUPPRESSED',
+        duplicateSuppressed: true,
+        response: 'qr_inicio duplicado ignorado para proteger el controlador',
+      });
     }
 
     const out = await sendDemoAction(action, req.body?.pulsesPerLiter);
