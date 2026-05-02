@@ -175,6 +175,26 @@ router.put('/machines/:id', requireAuthOrMonitorAdmin, async (req, res) => {
   }
 });
 
+router.delete('/machines/:id', requireAuthOrMonitorAdmin, async (req, res) => {
+  try {
+    const id = normalizeMachineId(req.params.id);
+    if (!id) {
+      return res.status(400).json({ error: 'id de maquina invalido' });
+    }
+
+    const existing = await prisma.machine.findUnique({ where: { id } });
+    if (!existing) {
+      return res.status(404).json({ error: 'Maquina no encontrada' });
+    }
+
+    await prisma.machine.delete({ where: { id } });
+    return res.json({ ok: true, deletedId: id });
+  } catch (error) {
+    console.error('DELETE /api/monitor-admin/machines/:id error', error);
+    return res.status(500).json({ error: 'No se pudo eliminar la maquina' });
+  }
+});
+
 router.get('/machines/:id/qr', requireAuthOrMonitorAdmin, async (req, res) => {
   try {
     const id = normalizeMachineId(req.params.id);
