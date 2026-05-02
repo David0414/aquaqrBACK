@@ -60,10 +60,15 @@ router.get('/summary', requireAuth, async (req, res) => {
     const totalAvailableCents = realBalanceCents + bonusBalanceCents;
     const totalLitersDispensed = Number(dispenseStats._sum.liters || 0);
     const totalSpentCents = Number(dispenseStats._sum.totalCents || 0);
-    const transactionCount = Number(transactionCounts[0] || 0) + Number(transactionCounts[1] || 0);
+    const rechargeCount = Number(transactionCounts[0] || 0);
+    const dispenseCount = Number(transactionCounts[1] || 0);
+    const transactionCount = rechargeCount + dispenseCount;
     const membershipDays = user?.createdAt
       ? Math.max(1, Math.floor((Date.now() - new Date(user.createdAt).getTime()) / (1000 * 60 * 60 * 24)))
       : 1;
+    const welcomeCredit = rewardCredits.find((item) => item.promotionKey === 'welcome_first_garrafon') || null;
+    const welcomeAvailable = Boolean(welcomeCredit) && rechargeCount === 0 && dispenseCount === 0;
+    const welcomeUsed = Boolean(welcomeCredit) && !welcomeAvailable;
 
     return res.json({
       wallet: {
@@ -76,6 +81,8 @@ router.get('/summary', requireAuth, async (req, res) => {
         totalLitersDispensed,
         totalSpentCents,
         transactionCount,
+        rechargeCount,
+        dispenseCount,
         membershipDays,
       },
       bonusSummary: {
@@ -93,7 +100,21 @@ router.get('/summary', requireAuth, async (req, res) => {
         sortOrder: promotion.sortOrder,
         isActive: Boolean(promotion.isActive),
         config: promotion.config || {},
+        status: promotion.key === 'welcome_first_garrafon'
+          ? {
+              available: welcomeAvailable,
+              used: welcomeUsed,
+              label: welcomeAvailable ? 'Disponible' : (welcomeUsed ? 'Usada' : 'Activa'),
+              creditAmountCents: Number(welcomeCredit?.amountCents || 0),
+            }
+          : null,
       })),
+      welcomeReward: {
+        available: welcomeAvailable,
+        used: welcomeUsed,
+        amountCents: Number(welcomeCredit?.amountCents || 0),
+        amount: moneyFromCents(welcomeCredit?.amountCents || 0),
+      },
       recentBonusCredits: rewardCredits.map((item) => ({
         id: item.id,
         promotionKey: item.promotionKey,
