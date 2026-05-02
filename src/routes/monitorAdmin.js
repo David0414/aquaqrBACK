@@ -65,12 +65,6 @@ function listStickerMachines() {
 }
 
 function mergeMachines(dbMachines) {
-  const knownHardwareIds = new Set(
-    (dbMachines || [])
-      .map((machine) => normalizeHardwareId(machine.hardwareId))
-      .filter(Boolean)
-  );
-
   const byId = new Map(
     (dbMachines || []).map((machine) => [
       machine.id,
@@ -83,10 +77,6 @@ function mergeMachines(dbMachines) {
   );
 
   for (const stickerMachine of listStickerMachines()) {
-    if (stickerMachine.detectedOnly && stickerMachine.hardwareId && knownHardwareIds.has(stickerMachine.hardwareId)) {
-      continue;
-    }
-
     if (!byId.has(stickerMachine.id)) {
       byId.set(stickerMachine.id, stickerMachine);
       continue;
