@@ -1,5 +1,7 @@
 const express = require('express');
 const QRCode = require('qrcode');
+const fs = require('fs');
+const path = require('path');
 const { prisma } = require('../db');
 const { signMachineLink } = require('../utils/qrSigning');
 const { requireAuthOrMonitorAdmin } = require('../utils/monitorAdmin');
@@ -10,6 +12,16 @@ const router = express.Router();
 const FRONT_URL = (process.env.APP_PUBLIC_URL || 'http://localhost:5173').replace(/\/+$/, '');
 const QR_BASE_URL = (process.env.QR_BASE_URL || FRONT_URL).replace(/\/+$/, '');
 const SECRET = process.env.QR_SIGNING_SECRET;
+const STICKERS_DIR = path.join(__dirname, '..', '..', 'stickers');
+const STICKER_MACHINE_DEFAULTS = Object.freeze({
+  'AQ-001': {
+    name: 'Dispensador AQ-001',
+    location: 'Sucursal Centro',
+    address: 'Sucursal Centro',
+    hardwareId: '01',
+    status: 'ONLINE',
+  },
+});
 
 function normalizeMachineId(value) {
   return String(value || '')
@@ -23,11 +35,78 @@ function normalizeHardwareId(value) {
   return clean ? clean.padStart(2, '0').slice(-2) : null;
 }
 
+function listStickerMachines() {
+  try {
+    if (!fs.existsSync(STICKERS_DIR)) return [];
+    return fs.readdirSync(STICKERS_DIR)
+      .filter((fileName) => fileName.toLowerCase().endsWith('.png'))
+      .map((fileName) => {
+        const id = normalizeMachineId(fileName.replace(/\.png$/i, ''));
+        if (!id) return null;
+        const defaults = STICKER_MACHINE_DEFAULTS[id] || {};
+        return {
+          id,
+          name: defaults.name || `Dispensador ${id}`,
+          location: defaults.location || null,
+          address: defaults.address || defaults.location || null,
+          hardwareId: normalizeHardwareId(defaults.hardwareId),
+          status: defaults.status || 'ONLINE',
+          isActive: true,
+          stickerUrl: `/stickers/${fileName}`,
+          discoveredFrom: 'sticker',
+          detectedOnly: true,
+        };
+      })
+      .filter(Boolean);
+  } catch (error) {
+    console.error('listStickerMachines error', error);
+    return [];
+  }
+}
+
+function mergeMachines(dbMachines) {
+  const byId = new Map(
+    (dbMachines || []).map((machine) => [
+      machine.id,
+      {
+        ...machine,
+        stickerUrl: `/stickers/${machine.id}.png`,
+        discoveredFrom: 'database',
+      },
+    ])
+  );
+
+  for (const stickerMachine of listStickerMachines()) {
+    if (!byId.has(stickerMachine.id)) {
+      byId.set(stickerMachine.id, stickerMachine);
+      continue;
+    }
+
+    const current = byId.get(stickerMachine.id);
+    byId.set(stickerMachine.id, {
+      ...current,
+      name: current.name || stickerMachine.name,
+      location: current.location || stickerMachine.location,
+      address: current.address || stickerMachine.address,
+      hardwareId: current.hardwareId || stickerMachine.hardwareId,
+      status: current.status || stickerMachine.status,
+      stickerUrl: current.stickerUrl || stickerMachine.stickerUrl,
+      discoveredFrom: current.discoveredFrom || 'database',
+    });
+  }
+
+  return Array.from(byId.values()).sort((a, b) => {
+    if (a.isActive !== b.isActive) return a.isActive ? -1 : 1;
+    return String(a.id).localeCompare(String(b.id));
+  });
+}
+
 router.get('/machines', requireAuthOrMonitorAdmin, async (_req, res) => {
   try {
-    const machines = await prisma.machine.findMany({
+    const dbMachines = await prisma.machine.findMany({
       orderBy: [{ isActive: 'desc' }, { id: 'asc' }],
     });
+    const machines = mergeMachines(dbMachines);
     return res.json({ items: machines });
   } catch (error) {
     console.error('GET /api/monitor-admin/machines error', error);
@@ -173,10 +252,11 @@ router.put('/promotions/:key', requireAuthOrMonitorAdmin, async (req, res) => {
 
 router.get('/summary', requireAuthOrMonitorAdmin, async (_req, res) => {
   try {
-    const [machines, promotions] = await Promise.all([
+    const [dbMachines, promotions] = await Promise.all([
       prisma.machine.findMany({ orderBy: [{ isActive: 'desc' }, { id: 'asc' }] }),
       getPromotionCatalog(prisma),
     ]);
+    const machines = mergeMachines(dbMachines);
 
     return res.json({
       machines,
