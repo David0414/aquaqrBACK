@@ -48,8 +48,10 @@ router.get('/history', requireAuth, async (req, res) => {
       ...recharges.map(r => ({
         id: r.id,
         type: 'recharge',
-        description: 'Recarga de saldo',
+        description: (r.bonusCents || 0) > 0 ? 'Recarga de saldo con bonificacion' : 'Recarga de saldo',
         amount: (r.amountCents || 0) / 100,
+        bonusAmount: (r.bonusCents || 0) / 100,
+        totalReceivedAmount: ((r.amountCents || 0) + (r.bonusCents || 0)) / 100,
         currency: (r.currency || 'MXN').toUpperCase(),
         date: r.createdAt,
         status: mapRechargeStatus(r.status),

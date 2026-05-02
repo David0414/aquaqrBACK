@@ -9,6 +9,13 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
 });
 
 const { requireAuth } = require('../utils/auth');
+const {
+  getPromotionCatalog,
+  getPromotionByKey,
+  getTopUpBonusCents,
+  PROMOTION_KEYS,
+  applyRewardCreditTx,
+} = require('../utils/rewards');
 
 /* -----------------------------------------------------------------------------
  * Helpers
@@ -25,7 +32,7 @@ async function ensureUserAndWallet({ userId, email, name }) {
   await prisma.wallet.upsert({
     where: { userId },
     update: {},
-    create: { userId, balanceCents: 0 },
+    create: { userId, balanceCents: 0, bonusBalanceCents: 0 },
   });
 }
 
@@ -49,6 +56,54 @@ function mapStatusToUi(status) {
       return 'cancelled';
     default:
       return 'completed';
+  }
+}
+
+async function settleRechargeSuccessTx(tx, recharge, actualAmountCents, currency, description = 'Recarga por Stripe') {
+  await tx.wallet.upsert({
+    where: { userId: recharge.userId },
+    update: { balanceCents: { increment: actualAmountCents } },
+    create: { userId: recharge.userId, balanceCents: actualAmountCents, bonusBalanceCents: 0 },
+  });
+
+  await tx.recharge.updateMany({
+    where: {
+      providerPaymentId: recharge.providerPaymentId,
+      userId: recharge.userId,
+      status: { not: 'SUCCEEDED' },
+    },
+    data: {
+      status: 'SUCCEEDED',
+      bonusCents: recharge.bonusCents || 0,
+    },
+  });
+
+  await tx.ledgerEntry.create({
+    data: {
+      userId: recharge.userId,
+      type: 'CREDIT',
+      amountCents: actualAmountCents,
+      currency,
+      description,
+      source: 'stripe',
+      externalId: recharge.providerPaymentId,
+      status: 'POSTED',
+    },
+  });
+
+  if ((recharge.bonusCents || 0) > 0) {
+    await applyRewardCreditTx(tx, {
+      userId: recharge.userId,
+      promotionKey: PROMOTION_KEYS.TOPUP,
+      externalId: `reward:topup:${recharge.providerPaymentId}`,
+      amountCents: recharge.bonusCents,
+      description: `Bonificacion por recarga de $${(actualAmountCents / 100).toFixed(2)}`,
+      metadata: {
+        rechargeId: recharge.id,
+        providerPaymentId: recharge.providerPaymentId,
+        amountCents: actualAmountCents,
+      },
+    });
   }
 }
 
@@ -80,6 +135,9 @@ router.post('/create-intent', requireAuth, async (req, res) => {
 
     // Asegura existencia de usuario y wallet
     await ensureUserAndWallet({ userId, email, name });
+    const promotions = await getPromotionCatalog(prisma);
+    const topupPromotion = getPromotionByKey(promotions, PROMOTION_KEYS.TOPUP);
+    const bonusCents = getTopUpBonusCents(amountCents, topupPromotion);
 
     // 1) Creamos la recarga en estado PENDING
     const recharge = await prisma.recharge.create({
@@ -87,7 +145,7 @@ router.post('/create-intent', requireAuth, async (req, res) => {
         userId,
         provider: 'STRIPE',
         amountCents,
-        bonusCents: 0, // si das bono según monto, cámbialo aquí
+        bonusCents,
         currency: dbCurrency,
         status: 'PENDING',
       },
@@ -112,7 +170,12 @@ router.post('/create-intent', requireAuth, async (req, res) => {
       data: { providerPaymentId: intent.id },
     });
 
-    return res.json({ clientSecret: intent.client_secret, rechargeId: recharge.id });
+    return res.json({
+      clientSecret: intent.client_secret,
+      rechargeId: recharge.id,
+      bonusCents,
+      totalReceiveCents: amountCents + bonusCents,
+    });
   } catch (err) {
     console.error('POST /api/recharge/create-intent error', err);
     return res.status(500).json({ error: 'No se pudo crear el intento de pago' });
@@ -142,8 +205,10 @@ router.get('/history', requireAuth, async (req, res) => {
     const items = page.map((r) => ({
       id: r.id,
       type: 'recharge',
-      description: 'Recarga de saldo',
+      description: (r.bonusCents || 0) > 0 ? 'Recarga de saldo con bonificacion' : 'Recarga de saldo',
       amount: (r.amountCents || 0) / 100, // número en unidades para la UI
+      bonusAmount: (r.bonusCents || 0) / 100,
+      totalReceivedAmount: ((r.amountCents || 0) + (r.bonusCents || 0)) / 100,
       currency: (r.currency || 'MXN').toUpperCase(),
       date: r.createdAt,
       status: mapStatusToUi(r.status),
@@ -168,30 +233,18 @@ router.get('/history', requireAuth, async (req, res) => {
 
 /** Acredita saldo + marca la recarga como SUCCEEDED (idempotente dentro de la TX). */
 async function creditWalletAndCloseRechargeTX(tx, { userId, amountCents, currency, providerPaymentId }) {
-  await tx.wallet.upsert({
-    where: { userId },
-    update: { balanceCents: { increment: amountCents } },
-    create: { userId, balanceCents: amountCents },
+  const recharge = await tx.recharge.findFirst({
+    where: { providerPaymentId, userId },
   });
+  if (!recharge) return;
 
-  await tx.recharge.updateMany({
-    where: { providerPaymentId, userId, status: { not: 'SUCCEEDED' } },
-    data: { status: 'SUCCEEDED' },
-  });
-
-  // asiento contable
-  await tx.ledgerEntry.create({
-    data: {
-      userId,
-      type: 'CREDIT',
-      amountCents,
-      currency,
-      description: 'Recarga por Stripe (reconciliada)',
-      source: 'stripe-recheck',
-      externalId: providerPaymentId,
-      status: 'POSTED',
-    },
-  });
+  await settleRechargeSuccessTx(
+    tx,
+    recharge,
+    amountCents,
+    currency,
+    'Recarga por Stripe (reconciliada)'
+  );
 }
 
 /** Consulta Stripe y reconcilia una recarga concreta. */
@@ -346,7 +399,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
         return {
           creditedCents: 0,
           creditedPesos: 0,
-          balanceCents: wallet?.balanceCents ?? 0,
+          balanceCents: Number(wallet?.balanceCents || 0) + Number(wallet?.bonusBalanceCents || 0),
           insertedAmount: hasInsertedAmount ? insertedAmount : 0,
           accumulatedAmount: accumulatedCents / 100,
           pulseCount,
@@ -370,7 +423,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
         return {
           creditedCents: 0,
           creditedPesos: 0,
-          balanceCents: wallet?.balanceCents ?? 0,
+          balanceCents: Number(wallet?.balanceCents || 0) + Number(wallet?.bonusBalanceCents || 0),
           insertedAmount: hasInsertedAmount ? insertedAmount : 0,
           accumulatedAmount: hasAccumulatedAmount ? accumulatedAmount : accumulatedCents / 100,
           previousAccumulatedAmount: checkpoint.lastAmountCents / 100,
@@ -398,7 +451,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
         return {
           creditedCents: 0,
           creditedPesos: 0,
-          balanceCents: wallet?.balanceCents ?? 0,
+          balanceCents: Number(wallet?.balanceCents || 0) + Number(wallet?.bonusBalanceCents || 0),
           insertedAmount: hasInsertedAmount ? insertedAmount : 0,
           accumulatedAmount: hasAccumulatedAmount ? accumulatedAmount : accumulatedCents / 100,
           previousAccumulatedAmount: checkpoint.lastAmountCents / 100,
@@ -412,7 +465,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
       const wallet = await tx.wallet.upsert({
         where: { userId },
         update: { balanceCents: { increment: creditedCents } },
-        create: { userId, balanceCents: creditedCents },
+        create: { userId, balanceCents: creditedCents, bonusBalanceCents: 0 },
       });
 
       await tx.telemetryCreditCheckpoint.update({
@@ -441,7 +494,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
       return {
         creditedCents,
         creditedPesos,
-        balanceCents: wallet.balanceCents,
+        balanceCents: Number(wallet.balanceCents || 0) + Number(wallet.bonusBalanceCents || 0),
         insertedAmount: hasInsertedAmount ? insertedAmount : 0,
         accumulatedAmount: hasAccumulatedAmount ? accumulatedAmount : accumulatedCents / 100,
         previousAccumulatedAmount: checkpoint.lastAmountCents / 100,

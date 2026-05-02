@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const Stripe = require('stripe');
 const { prisma } = require('../db'); // 👈 usa el singleton
+const { applyRewardCreditTx, PROMOTION_KEYS } = require('../utils/rewards');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: '2024-06-20' });
 
@@ -28,10 +29,15 @@ async function creditIfPending({ userId, rechargeId, providerPaymentId, amountCe
     });
     if (exists) return { credited: false, reason: 'ledger-exists' };
 
+    const recharge = await tx.recharge.findUnique({
+      where: { id: rechargeId },
+    });
+    if (!recharge) return { credited: false, reason: 'missing-recharge' };
+
     await tx.wallet.upsert({
       where: { userId },
       update: { balanceCents: { increment: amountCents } },
-      create: { userId, balanceCents: amountCents },
+      create: { userId, balanceCents: amountCents, bonusBalanceCents: 0 },
     });
 
     await tx.ledgerEntry.create({
@@ -46,6 +52,21 @@ async function creditIfPending({ userId, rechargeId, providerPaymentId, amountCe
         status: 'POSTED',
       },
     });
+
+    if ((recharge.bonusCents || 0) > 0) {
+      await applyRewardCreditTx(tx, {
+        userId,
+        promotionKey: PROMOTION_KEYS.TOPUP,
+        externalId: `reward:topup:${providerPaymentId}`,
+        amountCents: recharge.bonusCents,
+        description: `Bonificacion por recarga de $${(amountCents / 100).toFixed(2)}`,
+        metadata: {
+          rechargeId,
+          providerPaymentId,
+          amountCents,
+        },
+      });
+    }
 
     return { credited: true };
   });

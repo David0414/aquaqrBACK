@@ -74,13 +74,64 @@ async function ensureUserAndWallet(userId) {
   await prisma.wallet.upsert({
     where: { userId },
     update: {},
-    create: { userId, balanceCents: 0 },
+    create: { userId, balanceCents: 0, bonusBalanceCents: 0 },
   });
 }
 
 function totalForLiters(ltrs) {
   // total en centavos, entero
   return Math.round(ltrs * PRICE_PER_LITER_CENTS);
+}
+
+function totalAvailableBalanceCents(wallet) {
+  return Number(wallet?.balanceCents || 0) + Number(wallet?.bonusBalanceCents || 0);
+}
+
+function walletBalanceSnapshot(wallet) {
+  return {
+    balanceCents: totalAvailableBalanceCents(wallet),
+    realBalanceCents: Number(wallet?.balanceCents || 0),
+    bonusBalanceCents: Number(wallet?.bonusBalanceCents || 0),
+  };
+}
+
+async function debitWalletBalanceTx(tx, userId, totalCents) {
+  const wallet = await tx.wallet.findUnique({ where: { userId } });
+  if (!wallet) {
+    const error = new Error('Wallet no encontrada');
+    error.statusCode = 500;
+    throw error;
+  }
+
+  const availableCents = totalAvailableBalanceCents(wallet);
+  if (availableCents < totalCents) {
+    const error = new Error('INSUFFICIENT_FUNDS');
+    error.statusCode = 400;
+    error.code = 'INSUFFICIENT_FUNDS';
+    error.neededCents = totalCents - availableCents;
+    error.balanceCents = availableCents;
+    error.realBalanceCents = Number(wallet.balanceCents || 0);
+    error.bonusBalanceCents = Number(wallet.bonusBalanceCents || 0);
+    error.totalCents = totalCents;
+    throw error;
+  }
+
+  const bonusDebitedCents = Math.min(Number(wallet.bonusBalanceCents || 0), totalCents);
+  const realDebitedCents = totalCents - bonusDebitedCents;
+  const updatedWallet = await tx.wallet.update({
+    where: { userId },
+    data: {
+      balanceCents: { decrement: realDebitedCents },
+      bonusBalanceCents: { decrement: bonusDebitedCents },
+    },
+  });
+
+  return {
+    updatedWallet,
+    realDebitedCents,
+    bonusDebitedCents,
+    availableBeforeCents: availableCents,
+  };
 }
 
 function isMonitorAdminRequest(req) {
@@ -321,27 +372,8 @@ async function completeStartedDispense(existing, source = 'api') {
       return { alreadyCompleted: current?.status === 'COMPLETED' };
     }
 
-    const wallet = await tx.wallet.findUnique({ where: { userId: existing.userId } });
-    if (!wallet) {
-      const error = new Error('Wallet no encontrada');
-      error.statusCode = 500;
-      throw error;
-    }
-
-    if (wallet.balanceCents < existing.totalCents) {
-      const error = new Error('INSUFFICIENT_FUNDS');
-      error.statusCode = 400;
-      error.code = 'INSUFFICIENT_FUNDS';
-      error.neededCents = existing.totalCents - wallet.balanceCents;
-      error.balanceCents = wallet.balanceCents;
-      error.totalCents = existing.totalCents;
-      throw error;
-    }
-
-    const updatedWallet = await tx.wallet.update({
-      where: { userId: existing.userId },
-      data: { balanceCents: { decrement: existing.totalCents } },
-    });
+    const debitResult = await debitWalletBalanceTx(tx, existing.userId, existing.totalCents);
+    const updatedWallet = debitResult.updatedWallet;
 
     const ledger = await tx.ledgerEntry.create({
       data: {
@@ -358,7 +390,11 @@ async function completeStartedDispense(existing, source = 'api') {
 
     return {
       alreadyCompleted: false,
-      newBalanceCents: updatedWallet.balanceCents,
+      newBalanceCents: totalAvailableBalanceCents(updatedWallet),
+      newRealBalanceCents: Number(updatedWallet.balanceCents || 0),
+      newBonusBalanceCents: Number(updatedWallet.bonusBalanceCents || 0),
+      realDebitedCents: debitResult.realDebitedCents,
+      bonusDebitedCents: debitResult.bonusDebitedCents,
       ledgerId: ledger.id,
     };
   });
@@ -389,7 +425,7 @@ async function cancelStartedDispense(existing, source = 'api') {
       canceled: false,
       alreadyCanceled: true,
       status: existing.status,
-      balanceCents: wallet?.balanceCents,
+      balanceCents: totalAvailableBalanceCents(wallet),
     };
   }
 
@@ -399,7 +435,7 @@ async function cancelStartedDispense(existing, source = 'api') {
       canceled: false,
       alreadyCompleted: true,
       status: existing.status,
-      balanceCents: wallet?.balanceCents,
+      balanceCents: totalAvailableBalanceCents(wallet),
     };
   }
 
@@ -460,7 +496,7 @@ async function cancelStartedDispense(existing, source = 'api') {
 
     if (balanceCents === undefined) {
       const wallet = await tx.wallet.findUnique({ where: { userId: existing.userId } });
-      balanceCents = wallet?.balanceCents;
+      balanceCents = totalAvailableBalanceCents(wallet);
     }
 
     console.log(`[Dispense] Dispensado cancelado (${source}): ${existing.id}`);
@@ -956,11 +992,14 @@ router.post('/', requireAuth, async (req, res) => {
       return res.status(500).json({ error: 'Wallet no encontrada' });
     }
 
-    if (wallet.balanceCents < totalCents) {
+    const walletSnapshot = walletBalanceSnapshot(wallet);
+    if (walletSnapshot.balanceCents < totalCents) {
       return res.status(400).json({
         error: 'INSUFFICIENT_FUNDS',
-        neededCents: totalCents - wallet.balanceCents,
-        balanceCents: wallet.balanceCents,
+        neededCents: totalCents - walletSnapshot.balanceCents,
+        balanceCents: walletSnapshot.balanceCents,
+        realBalanceCents: walletSnapshot.realBalanceCents,
+        bonusBalanceCents: walletSnapshot.bonusBalanceCents,
         totalCents,
       });
     }
@@ -1001,8 +1040,10 @@ router.post('/', requireAuth, async (req, res) => {
       totalCents,
       currency: CURRENCY,
       pulsesPerLiter: safePulsesPerLiter,
-      prevBalanceCents: wallet.balanceCents,
-      newBalanceCents: wallet.balanceCents,
+      prevBalanceCents: walletSnapshot.balanceCents,
+      newBalanceCents: walletSnapshot.balanceCents,
+      realBalanceCents: walletSnapshot.realBalanceCents,
+      bonusBalanceCents: walletSnapshot.bonusBalanceCents,
     });
   } catch (e) {
     if (e.code === 'MACHINE_BUSY') {
@@ -1051,7 +1092,7 @@ router.post('/complete', requireAuth, async (req, res) => {
         amountCents: existing.totalCents,
         totalCents: existing.totalCents,
         currency: existing.currency,
-        newBalanceCents: wallet?.balanceCents ?? 0,
+        newBalanceCents: totalAvailableBalanceCents(wallet),
       });
     }
 
@@ -1073,27 +1114,8 @@ router.post('/complete', requireAuth, async (req, res) => {
         return { alreadyCompleted: current?.status === 'COMPLETED' };
       }
 
-      const wallet = await tx.wallet.findUnique({ where: { userId } });
-      if (!wallet) {
-        const error = new Error('Wallet no encontrada');
-        error.statusCode = 500;
-        throw error;
-      }
-
-      if (wallet.balanceCents < existing.totalCents) {
-        const error = new Error('INSUFFICIENT_FUNDS');
-        error.statusCode = 400;
-        error.code = 'INSUFFICIENT_FUNDS';
-        error.neededCents = existing.totalCents - wallet.balanceCents;
-        error.balanceCents = wallet.balanceCents;
-        error.totalCents = existing.totalCents;
-        throw error;
-      }
-
-      const updatedWallet = await tx.wallet.update({
-        where: { userId },
-        data: { balanceCents: { decrement: existing.totalCents } },
-      });
+      const debitResult = await debitWalletBalanceTx(tx, userId, existing.totalCents);
+      const updatedWallet = debitResult.updatedWallet;
 
       const ledger = await tx.ledgerEntry.create({
         data: {
@@ -1110,7 +1132,11 @@ router.post('/complete', requireAuth, async (req, res) => {
 
       return {
         alreadyCompleted: false,
-        newBalanceCents: updatedWallet.balanceCents,
+        newBalanceCents: totalAvailableBalanceCents(updatedWallet),
+        newRealBalanceCents: Number(updatedWallet.balanceCents || 0),
+        newBonusBalanceCents: Number(updatedWallet.bonusBalanceCents || 0),
+        realDebitedCents: debitResult.realDebitedCents,
+        bonusDebitedCents: debitResult.bonusDebitedCents,
         ledgerId: ledger.id,
       };
     });
@@ -1141,7 +1167,9 @@ router.post('/complete', requireAuth, async (req, res) => {
       amountCents: existing.totalCents,
       totalCents: existing.totalCents,
       currency: existing.currency,
-      newBalanceCents: result.newBalanceCents ?? wallet?.balanceCents ?? 0,
+      newBalanceCents: result.newBalanceCents ?? totalAvailableBalanceCents(wallet),
+      realBalanceCents: result.newRealBalanceCents ?? Number(wallet?.balanceCents || 0),
+      bonusBalanceCents: result.newBonusBalanceCents ?? Number(wallet?.bonusBalanceCents || 0),
       ledgerId: result.ledgerId,
     });
   } catch (e) {
@@ -1150,6 +1178,8 @@ router.post('/complete', requireAuth, async (req, res) => {
         error: 'INSUFFICIENT_FUNDS',
         neededCents: e.neededCents,
         balanceCents: e.balanceCents,
+        realBalanceCents: e.realBalanceCents,
+        bonusBalanceCents: e.bonusBalanceCents,
         totalCents: e.totalCents,
       });
     }
