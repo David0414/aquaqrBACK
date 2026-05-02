@@ -19,25 +19,29 @@ router.get('/summary', requireAuth, async (req, res) => {
   try {
     const { userId, email, name } = req.auth;
 
-    await prisma.user.upsert({
-      where: { id: userId },
-      update: { email, name },
-      create: { id: userId, email, name },
-    });
+    await Promise.all([
+      prisma.user.upsert({
+        where: { id: userId },
+        update: { email, name },
+        create: { id: userId, email, name },
+      }),
+      prisma.wallet.upsert({
+        where: { userId },
+        update: {},
+        create: { userId, balanceCents: 0, bonusBalanceCents: 0 },
+      }),
+    ]);
 
-    await prisma.wallet.upsert({
-      where: { userId },
-      update: {},
-      create: { userId, balanceCents: 0, bonusBalanceCents: 0 },
-    });
+    const promotions = await getPromotionCatalog(prisma);
 
-    await ensureWelcomeReward(prisma, userId);
-    await settleMonthlyRewards(prisma, userId);
+    await Promise.all([
+      ensureWelcomeReward(prisma, userId, promotions),
+      settleMonthlyRewards(prisma, userId, new Date(), promotions),
+    ]);
 
-    const [wallet, promotions, preview, totals, rewardCredits, dispenseStats, transactionCounts, user] = await Promise.all([
+    const [wallet, preview, totals, rewardCredits, dispenseStats, transactionCounts, user] = await Promise.all([
       prisma.wallet.findUnique({ where: { userId } }),
-      getPromotionCatalog(prisma),
-      getCurrentMonthRewardPreview(prisma, userId),
+      getCurrentMonthRewardPreview(prisma, userId, new Date(), promotions),
       getUserRewardTotals(prisma, userId),
       getRewardCredits(prisma, userId, 10),
       prisma.dispense.aggregate({

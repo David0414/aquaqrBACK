@@ -143,6 +143,13 @@ function getPromotionByKey(promotions, key) {
   return promotions.find((promotion) => promotion.key === key) || null;
 }
 
+async function resolvePromotions(client = prisma, promotions = null) {
+  if (Array.isArray(promotions) && promotions.length > 0) {
+    return promotions;
+  }
+  return getPromotionCatalog(client);
+}
+
 function getTopUpBonusCents(amountCents, promotion) {
   if (!promotion?.isActive) return 0;
   const tiers = Array.isArray(promotion.config?.tiers) ? promotion.config.tiers : [];
@@ -209,9 +216,9 @@ async function applyRewardCreditTx(tx, reward) {
   };
 }
 
-async function ensureWelcomeReward(client, userId) {
-  const promotions = await getPromotionCatalog(client);
-  const welcomePromotion = getPromotionByKey(promotions, PROMOTION_KEYS.WELCOME);
+async function ensureWelcomeReward(client, userId, promotions = null) {
+  const resolvedPromotions = await resolvePromotions(client, promotions);
+  const welcomePromotion = getPromotionByKey(resolvedPromotions, PROMOTION_KEYS.WELCOME);
   if (!welcomePromotion?.isActive) return null;
 
   const wallet = await client.wallet.findUnique({ where: { userId } });
@@ -265,8 +272,8 @@ async function getMonthlyCompletedDispenseStats(client, userId, fromDate, toDate
   };
 }
 
-async function settleMonthlyRewards(client, userId, now = new Date()) {
-  const promotions = await getPromotionCatalog(client);
+async function settleMonthlyRewards(client, userId, now = new Date(), promotions = null) {
+  const resolvedPromotions = await resolvePromotions(client, promotions);
   const previousMonth = addMonths(startOfMonth(now), -1);
   const fromDate = previousMonth;
   const toDate = addMonths(fromDate, 1);
@@ -282,7 +289,7 @@ async function settleMonthlyRewards(client, userId, now = new Date()) {
     };
   }
 
-  const cashbackPromotion = getPromotionByKey(promotions, PROMOTION_KEYS.CASHBACK);
+  const cashbackPromotion = getPromotionByKey(resolvedPromotions, PROMOTION_KEYS.CASHBACK);
   if (cashbackPromotion?.isActive) {
     const cashbackTier = getCashbackTier(stats.garrafones, cashbackPromotion);
     const cashbackPerGarrafonCents = Number(cashbackTier?.cashbackPerGarrafonCents) || 0;
@@ -308,7 +315,7 @@ async function settleMonthlyRewards(client, userId, now = new Date()) {
     });
   }
 
-  const pointsPromotion = getPromotionByKey(promotions, PROMOTION_KEYS.POINTS);
+  const pointsPromotion = getPromotionByKey(resolvedPromotions, PROMOTION_KEYS.POINTS);
   if (pointsPromotion?.isActive) {
     const pointsPerLiter = Math.max(1, Number(pointsPromotion.config?.pointsPerLiter) || DEFAULT_POINTS_PER_LITER);
     const points = Math.round(stats.liters * pointsPerLiter);
@@ -346,13 +353,13 @@ async function settleMonthlyRewards(client, userId, now = new Date()) {
   };
 }
 
-async function getCurrentMonthRewardPreview(client, userId, now = new Date()) {
-  const promotions = await getPromotionCatalog(client);
+async function getCurrentMonthRewardPreview(client, userId, now = new Date(), promotions = null) {
+  const resolvedPromotions = await resolvePromotions(client, promotions);
   const fromDate = startOfMonth(now);
   const toDate = addMonths(fromDate, 1);
   const stats = await getMonthlyCompletedDispenseStats(client, userId, fromDate, toDate);
-  const cashbackPromotion = getPromotionByKey(promotions, PROMOTION_KEYS.CASHBACK);
-  const pointsPromotion = getPromotionByKey(promotions, PROMOTION_KEYS.POINTS);
+  const cashbackPromotion = getPromotionByKey(resolvedPromotions, PROMOTION_KEYS.CASHBACK);
+  const pointsPromotion = getPromotionByKey(resolvedPromotions, PROMOTION_KEYS.POINTS);
 
   const cashbackTier = cashbackPromotion?.isActive ? getCashbackTier(stats.garrafones, cashbackPromotion) : null;
   const cashbackPerGarrafonCents = Number(cashbackTier?.cashbackPerGarrafonCents) || 0;
