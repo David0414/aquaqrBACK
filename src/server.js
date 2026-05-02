@@ -11,6 +11,7 @@ process.on('uncaughtException', (error) => {
 
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
 
 // Rutas
 const walletRoutes   = require('./routes/wallet');
@@ -41,6 +42,7 @@ app.use('/webhooks', express.raw({ type: 'application/json' }), webhookRouter);
 
 // 2) Resto con JSON
 app.use(express.json());
+app.use('/stickers', express.static(path.join(__dirname, '..', 'stickers')));
 
 // Healthcheck
 app.get('/api/health', (_, res) => res.json({ ok: true }));
