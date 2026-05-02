@@ -21,6 +21,7 @@ const opsRoutes      = require('./routes/ops');
 const webhookRouter  = require('./routes/webhooks');
 const rewardsRoutes  = require('./routes/rewards');
 const monitorAdminRoutes = require('./routes/monitorAdmin');
+const telemetryRoutes = require('./routes/telemetry');
 
 // ✅ CORREGIDO: server.js ya está dentro de src/, así que no va './src/...'
 const qrRoutes       = require('./routes/qr');
@@ -60,6 +61,7 @@ app.use('/api/recharge', rechargeRoutes);
 app.use('/api/dispense', dispenseRoutes);
 app.use('/api/rewards', rewardsRoutes);
 app.use('/api/monitor-admin', monitorAdminRoutes);
+app.use('/api/telemetry', telemetryRoutes);
 
 // Historial (ej: GET /api/history)
 app.use('/api', historyRoutes);
