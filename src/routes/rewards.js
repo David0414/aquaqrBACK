@@ -9,6 +9,9 @@ const {
   getCurrentMonthRewardPreview,
   getUserRewardTotals,
   getRewardCredits,
+  getUserPromotionSelectionState,
+  saveUserPromotionSelections,
+  isMonthlySelectablePromotion,
 } = require('../utils/rewards');
 
 function moneyFromCents(amountCents) {
@@ -39,7 +42,7 @@ router.get('/summary', requireAuth, async (req, res) => {
       settleMonthlyRewards(prisma, userId, new Date(), promotions),
     ]);
 
-    const [wallet, preview, totals, rewardCredits, dispenseStats, transactionCounts, user] = await Promise.all([
+    const [wallet, preview, totals, rewardCredits, dispenseStats, transactionCounts, user, selectionState] = await Promise.all([
       prisma.wallet.findUnique({ where: { userId } }),
       getCurrentMonthRewardPreview(prisma, userId, new Date(), promotions),
       getUserRewardTotals(prisma, userId),
@@ -57,6 +60,7 @@ router.get('/summary', requireAuth, async (req, res) => {
         where: { id: userId },
         select: { createdAt: true },
       }),
+      getUserPromotionSelectionState(prisma, userId, new Date(), promotions),
     ]);
 
     const realBalanceCents = Number(wallet?.balanceCents || 0);
@@ -103,6 +107,11 @@ router.get('/summary', requireAuth, async (req, res) => {
         kind: promotion.kind,
         sortOrder: promotion.sortOrder,
         isActive: Boolean(promotion.isActive),
+        requiresMonthlySelection: isMonthlySelectablePromotion(promotion),
+        isSelectedForMonth: selectionState.selectedPromotionKeys.includes(promotion.key),
+        isEnabledForUserThisMonth: isMonthlySelectablePromotion(promotion)
+          ? selectionState.selectedPromotionKeys.includes(promotion.key)
+          : Boolean(promotion.isActive),
         config: promotion.config || {},
         status: promotion.key === 'welcome_first_garrafon'
           ? {
@@ -119,6 +128,21 @@ router.get('/summary', requireAuth, async (req, res) => {
         amountCents: Number(welcomeCredit?.amountCents || 0),
         amount: moneyFromCents(welcomeCredit?.amountCents || 0),
       },
+      selection: {
+        month: selectionState.month,
+        requiredCount: selectionState.requiredCount,
+        selectedPromotionKeys: selectionState.selectedPromotionKeys,
+        complete: selectionState.complete,
+        selectablePromotions: selectionState.selectablePromotions.map((promotion) => ({
+          key: promotion.key,
+          title: promotion.title,
+          summary: promotion.summary,
+          description: promotion.description,
+          kind: promotion.kind,
+          sortOrder: promotion.sortOrder,
+          config: promotion.config || {},
+        })),
+      },
       recentBonusCredits: rewardCredits.map((item) => ({
         id: item.id,
         promotionKey: item.promotionKey,
@@ -132,6 +156,37 @@ router.get('/summary', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('GET /api/rewards/summary error', error);
     return res.status(500).json({ error: 'No se pudo cargar el resumen de recompensas' });
+  }
+});
+
+router.put('/selection', requireAuth, async (req, res) => {
+  try {
+    const { userId, email, name } = req.auth;
+    const promotionKeys = Array.isArray(req.body?.promotionKeys) ? req.body.promotionKeys : [];
+
+    await Promise.all([
+      prisma.user.upsert({
+        where: { id: userId },
+        update: { email, name },
+        create: { id: userId, email, name },
+      }),
+      prisma.wallet.upsert({
+        where: { userId },
+        update: {},
+        create: { userId, balanceCents: 0, bonusBalanceCents: 0 },
+      }),
+    ]);
+
+    const promotions = await getPromotionCatalog(prisma);
+    const result = await saveUserPromotionSelections(prisma, userId, promotionKeys, new Date(), promotions);
+
+    return res.json({
+      ok: true,
+      selection: result,
+    });
+  } catch (error) {
+    console.error('PUT /api/rewards/selection error', error);
+    return res.status(400).json({ error: error.message || 'No se pudo guardar tu seleccion de promociones' });
   }
 });
 

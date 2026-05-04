@@ -15,6 +15,7 @@ const {
   getTopUpBonusCents,
   PROMOTION_KEYS,
   applyRewardCreditTx,
+  getUserPromotionSelectionState,
 } = require('../utils/rewards');
 
 /* -----------------------------------------------------------------------------
@@ -136,8 +137,10 @@ router.post('/create-intent', requireAuth, async (req, res) => {
     // Asegura existencia de usuario y wallet
     await ensureUserAndWallet({ userId, email, name });
     const promotions = await getPromotionCatalog(prisma);
+    const selectionState = await getUserPromotionSelectionState(prisma, userId, new Date(), promotions);
     const topupPromotion = getPromotionByKey(promotions, PROMOTION_KEYS.TOPUP);
-    const bonusCents = getTopUpBonusCents(amountCents, topupPromotion);
+    const topupEnabledForUser = selectionState.selectedPromotionKeys.includes(PROMOTION_KEYS.TOPUP);
+    const bonusCents = topupEnabledForUser ? getTopUpBonusCents(amountCents, topupPromotion) : 0;
 
     // 1) Creamos la recarga en estado PENDING
     const recharge = await prisma.recharge.create({

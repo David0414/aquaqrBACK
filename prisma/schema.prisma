@@ -53,6 +53,7 @@ model User {
   telemetryCredits TelemetryCreditCheckpoint[]
   machineLocks MachineLock[]
   rewardCredits RewardCredit[]
+  promotionSelections UserPromotionSelection[]
 
   notificationSettings NotificationSettings?
 }
@@ -216,4 +217,17 @@ model RewardCredit {
 
   @@index([userId, createdAt])
   @@index([promotionKey, createdAt])
+}
+
+model UserPromotionSelection {
+  id           String   @id @default(cuid())
+  userId       String
+  monthKey     String
+  promotionKey String
+  createdAt    DateTime @default(now())
+  user         User     @relation(fields: [userId], references: [id])
+
+  @@unique([userId, monthKey, promotionKey])
+  @@index([userId, monthKey])
+  @@index([promotionKey, monthKey])
 }

@@ -13,6 +13,12 @@ const PROMOTION_KEYS = Object.freeze({
   MEMBERSHIP: 'premium_membership',
 });
 
+const MONTHLY_SELECTABLE_PROMOTION_KEYS = Object.freeze([
+  PROMOTION_KEYS.TOPUP,
+  PROMOTION_KEYS.CASHBACK,
+  PROMOTION_KEYS.POINTS,
+]);
+
 const DEFAULT_PROMOTIONS = Object.freeze([
   {
     key: PROMOTION_KEYS.WELCOME,
@@ -143,6 +149,18 @@ function getPromotionByKey(promotions, key) {
   return promotions.find((promotion) => promotion.key === key) || null;
 }
 
+function isMonthlySelectablePromotion(promotion) {
+  return MONTHLY_SELECTABLE_PROMOTION_KEYS.includes(promotion?.key);
+}
+
+function getMonthlySelectablePromotions(promotions) {
+  return (promotions || []).filter((promotion) => promotion.isActive && isMonthlySelectablePromotion(promotion));
+}
+
+function isMissingSelectionTableError(error) {
+  return error?.code === 'P2021' || /UserPromotionSelection/i.test(String(error?.message || ''));
+}
+
 async function resolvePromotions(client = prisma, promotions = null) {
   if (Array.isArray(promotions) && promotions.length > 0) {
     return promotions;
@@ -157,6 +175,96 @@ function getTopUpBonusCents(amountCents, promotion) {
     .filter((item) => Number(item.amountCents) <= amountCents)
     .sort((a, b) => Number(b.amountCents) - Number(a.amountCents))[0];
   return Math.max(0, Number(tier?.bonusCents) || 0);
+}
+
+async function getUserPromotionSelections(client, userId, selectionMonthKey) {
+  try {
+    return await client.userPromotionSelection.findMany({
+      where: {
+        userId,
+        monthKey: selectionMonthKey,
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+  } catch (error) {
+    if (isMissingSelectionTableError(error)) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+async function getUserSelectedPromotionKeys(client, userId, selectionMonthKey) {
+  const rows = await getUserPromotionSelections(client, userId, selectionMonthKey);
+  return rows.map((row) => row.promotionKey);
+}
+
+async function saveUserPromotionSelections(client, userId, promotionKeys, now = new Date(), promotions = null) {
+  const resolvedPromotions = await resolvePromotions(client, promotions);
+  const selectionMonthKey = monthKey(startOfMonth(now));
+  const selectablePromotions = getMonthlySelectablePromotions(resolvedPromotions);
+  const selectableKeys = new Set(selectablePromotions.map((promotion) => promotion.key));
+  const requiredCount = Math.min(2, selectablePromotions.length);
+  const uniqueKeys = [...new Set((promotionKeys || []).filter(Boolean))];
+
+  if (uniqueKeys.length !== requiredCount) {
+    throw new Error(requiredCount > 0
+      ? `Debes elegir ${requiredCount} promociones`
+      : 'No hay promociones para elegir');
+  }
+
+  const invalidKey = uniqueKeys.find((key) => !selectableKeys.has(key));
+  if (invalidKey) {
+    throw new Error('Una de las promociones elegidas no esta disponible este mes');
+  }
+
+  try {
+    await client.$transaction(async (tx) => {
+      await tx.userPromotionSelection.deleteMany({
+        where: {
+          userId,
+          monthKey: selectionMonthKey,
+        },
+      });
+
+      if (uniqueKeys.length > 0) {
+        await tx.userPromotionSelection.createMany({
+          data: uniqueKeys.map((promotionKey) => ({
+            userId,
+            monthKey: selectionMonthKey,
+            promotionKey,
+          })),
+        });
+      }
+    });
+  } catch (error) {
+    if (isMissingSelectionTableError(error)) {
+      throw new Error('La base de datos aun no tiene habilitada la seleccion mensual de promociones');
+    }
+    throw error;
+  }
+
+  return {
+    month: selectionMonthKey,
+    promotionKeys: uniqueKeys,
+    requiredCount,
+  };
+}
+
+async function getUserPromotionSelectionState(client, userId, now = new Date(), promotions = null) {
+  const resolvedPromotions = await resolvePromotions(client, promotions);
+  const selectionMonthKey = monthKey(startOfMonth(now));
+  const selectablePromotions = getMonthlySelectablePromotions(resolvedPromotions);
+  const requiredCount = Math.min(2, selectablePromotions.length);
+  const selectedPromotionKeys = await getUserSelectedPromotionKeys(client, userId, selectionMonthKey);
+
+  return {
+    month: selectionMonthKey,
+    requiredCount,
+    selectedPromotionKeys,
+    complete: requiredCount === 0 ? true : selectedPromotionKeys.length === requiredCount,
+    selectablePromotions,
+  };
 }
 
 function getCashbackTier(garrafones, promotion) {
@@ -278,6 +386,7 @@ async function settleMonthlyRewards(client, userId, now = new Date(), promotions
   const fromDate = previousMonth;
   const toDate = addMonths(fromDate, 1);
   const key = monthKey(fromDate);
+  const selectedPromotionKeys = new Set(await getUserSelectedPromotionKeys(client, userId, key));
   const stats = await getMonthlyCompletedDispenseStats(client, userId, fromDate, toDate);
   const results = [];
 
@@ -290,7 +399,7 @@ async function settleMonthlyRewards(client, userId, now = new Date(), promotions
   }
 
   const cashbackPromotion = getPromotionByKey(resolvedPromotions, PROMOTION_KEYS.CASHBACK);
-  if (cashbackPromotion?.isActive) {
+  if (cashbackPromotion?.isActive && selectedPromotionKeys.has(PROMOTION_KEYS.CASHBACK)) {
     const cashbackTier = getCashbackTier(stats.garrafones, cashbackPromotion);
     const cashbackPerGarrafonCents = Number(cashbackTier?.cashbackPerGarrafonCents) || 0;
     const cashbackCents = Math.round(stats.garrafones * cashbackPerGarrafonCents);
@@ -316,7 +425,7 @@ async function settleMonthlyRewards(client, userId, now = new Date(), promotions
   }
 
   const pointsPromotion = getPromotionByKey(resolvedPromotions, PROMOTION_KEYS.POINTS);
-  if (pointsPromotion?.isActive) {
+  if (pointsPromotion?.isActive && selectedPromotionKeys.has(PROMOTION_KEYS.POINTS)) {
     const pointsPerLiter = Math.max(1, Number(pointsPromotion.config?.pointsPerLiter) || DEFAULT_POINTS_PER_LITER);
     const points = Math.round(stats.liters * pointsPerLiter);
     const pointsTier = getPointsTier(points, pointsPromotion);
@@ -357,17 +466,23 @@ async function getCurrentMonthRewardPreview(client, userId, now = new Date(), pr
   const resolvedPromotions = await resolvePromotions(client, promotions);
   const fromDate = startOfMonth(now);
   const toDate = addMonths(fromDate, 1);
+  const currentMonthKey = monthKey(fromDate);
+  const selectedPromotionKeys = new Set(await getUserSelectedPromotionKeys(client, userId, currentMonthKey));
   const stats = await getMonthlyCompletedDispenseStats(client, userId, fromDate, toDate);
   const cashbackPromotion = getPromotionByKey(resolvedPromotions, PROMOTION_KEYS.CASHBACK);
   const pointsPromotion = getPromotionByKey(resolvedPromotions, PROMOTION_KEYS.POINTS);
 
-  const cashbackTier = cashbackPromotion?.isActive ? getCashbackTier(stats.garrafones, cashbackPromotion) : null;
+  const cashbackTier = cashbackPromotion?.isActive && selectedPromotionKeys.has(PROMOTION_KEYS.CASHBACK)
+    ? getCashbackTier(stats.garrafones, cashbackPromotion)
+    : null;
   const cashbackPerGarrafonCents = Number(cashbackTier?.cashbackPerGarrafonCents) || 0;
   const estimatedCashbackCents = Math.round(stats.garrafones * cashbackPerGarrafonCents);
 
   const pointsPerLiter = Math.max(1, Number(pointsPromotion?.config?.pointsPerLiter) || DEFAULT_POINTS_PER_LITER);
   const points = Math.round(stats.liters * pointsPerLiter);
-  const pointsTier = pointsPromotion?.isActive ? getPointsTier(points, pointsPromotion) : null;
+  const pointsTier = pointsPromotion?.isActive && selectedPromotionKeys.has(PROMOTION_KEYS.POINTS)
+    ? getPointsTier(points, pointsPromotion)
+    : null;
   const bonusPercent = Number(pointsTier?.bonusPercent) || 0;
   const estimatedPointsBonusCents = Math.round(stats.totalCents * (bonusPercent / 100));
 
@@ -416,9 +531,12 @@ module.exports = {
   DEFAULT_POINTS_PER_LITER,
   PROMOTION_KEYS,
   DEFAULT_PROMOTIONS,
+  MONTHLY_SELECTABLE_PROMOTION_KEYS,
   ensurePromotionCatalog,
   getPromotionCatalog,
   getPromotionByKey,
+  isMonthlySelectablePromotion,
+  getMonthlySelectablePromotions,
   getTopUpBonusCents,
   getCashbackTier,
   getPointsTier,
@@ -428,6 +546,10 @@ module.exports = {
   getCurrentMonthRewardPreview,
   getUserRewardTotals,
   getRewardCredits,
+  getUserPromotionSelections,
+  getUserSelectedPromotionKeys,
+  saveUserPromotionSelections,
+  getUserPromotionSelectionState,
   monthKey,
   startOfMonth,
 };
