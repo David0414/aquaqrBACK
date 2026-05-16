@@ -44,6 +44,16 @@ function normalizeMachineId(value) {
     .replace(/[^0-9A-Z_-]/g, '') || 'UNKNOWN';
 }
 
+function walletBalanceResponse(wallet) {
+  const realBalanceCents = Number(wallet?.balanceCents || 0);
+  const bonusBalanceCents = Number(wallet?.bonusBalanceCents || 0);
+  return {
+    balanceCents: realBalanceCents + bonusBalanceCents,
+    realBalanceCents,
+    bonusBalanceCents,
+  };
+}
+
 /** Mapea estatus de Prisma -> etiqueta de UI */
 function mapStatusToUi(status) {
   switch (status) {
@@ -402,7 +412,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
         return {
           creditedCents: 0,
           creditedPesos: 0,
-          balanceCents: Number(wallet?.balanceCents || 0) + Number(wallet?.bonusBalanceCents || 0),
+          ...walletBalanceResponse(wallet),
           insertedAmount: hasInsertedAmount ? insertedAmount : 0,
           accumulatedAmount: accumulatedCents / 100,
           pulseCount,
@@ -426,7 +436,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
         return {
           creditedCents: 0,
           creditedPesos: 0,
-          balanceCents: Number(wallet?.balanceCents || 0) + Number(wallet?.bonusBalanceCents || 0),
+          ...walletBalanceResponse(wallet),
           insertedAmount: hasInsertedAmount ? insertedAmount : 0,
           accumulatedAmount: hasAccumulatedAmount ? accumulatedAmount : accumulatedCents / 100,
           previousAccumulatedAmount: checkpoint.lastAmountCents / 100,
@@ -454,7 +464,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
         return {
           creditedCents: 0,
           creditedPesos: 0,
-          balanceCents: Number(wallet?.balanceCents || 0) + Number(wallet?.bonusBalanceCents || 0),
+          ...walletBalanceResponse(wallet),
           insertedAmount: hasInsertedAmount ? insertedAmount : 0,
           accumulatedAmount: hasAccumulatedAmount ? accumulatedAmount : accumulatedCents / 100,
           previousAccumulatedAmount: checkpoint.lastAmountCents / 100,
@@ -497,7 +507,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
       return {
         creditedCents,
         creditedPesos,
-        balanceCents: Number(wallet.balanceCents || 0) + Number(wallet.bonusBalanceCents || 0),
+        ...walletBalanceResponse(wallet),
         insertedAmount: hasInsertedAmount ? insertedAmount : 0,
         accumulatedAmount: hasAccumulatedAmount ? accumulatedAmount : accumulatedCents / 100,
         previousAccumulatedAmount: checkpoint.lastAmountCents / 100,
