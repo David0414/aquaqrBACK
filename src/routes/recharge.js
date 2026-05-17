@@ -406,6 +406,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
         ? accumulatedAmount * 100
         : checkpoint.lastAmountCents;
       const insertedCents = hasInsertedAmount && insertedAmount > 0 ? insertedAmount * 100 : 0;
+      const accumulatedDeltaCents = Math.max(0, accumulatedCents - checkpoint.lastAmountCents);
 
       if (rawFrame && checkpoint.lastFrame === rawFrame) {
         const wallet = await tx.wallet.findUnique({ where: { userId } });
@@ -423,6 +424,23 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
       }
 
       if (accumulatedCents < checkpoint.lastAmountCents) {
+        if (insertedCents > 0) {
+          const wallet = await tx.wallet.findUnique({ where: { userId } });
+          return {
+            creditedCents: 0,
+            creditedPesos: 0,
+            ...walletBalanceResponse(wallet),
+            insertedAmount: hasInsertedAmount ? insertedAmount : 0,
+            accumulatedAmount: hasAccumulatedAmount ? accumulatedAmount : accumulatedCents / 100,
+            previousAccumulatedAmount: checkpoint.lastAmountCents / 100,
+            pulseCount,
+            previousPulseCount: checkpoint.lastPulseCount ?? 0,
+            machineId,
+            staleAccumulatedAmount: true,
+            resetDetected: false,
+          };
+        }
+
         await tx.telemetryCreditCheckpoint.update({
           where: { id: checkpoint.id },
           data: {
@@ -447,9 +465,13 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
         };
       }
 
-      const creditedCents = hasAccumulatedAmount
-        ? Math.max(0, accumulatedCents - checkpoint.lastAmountCents)
-        : insertedCents;
+      const creditedCents = insertedCents > 0
+        ? Math.max(accumulatedDeltaCents, insertedCents)
+        : accumulatedDeltaCents;
+      const nextCheckpointAmountCents = hasAccumulatedAmount
+        ? Math.max(accumulatedCents, checkpoint.lastAmountCents + creditedCents)
+        : checkpoint.lastAmountCents + creditedCents;
+
       if (creditedCents <= 0) {
         await tx.telemetryCreditCheckpoint.update({
           where: { id: checkpoint.id },
@@ -485,7 +507,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
         where: { id: checkpoint.id },
         data: {
           lastPulseCount: Number.isFinite(pulseCount) && pulseCount >= 0 ? pulseCount : checkpoint.lastPulseCount,
-          lastAmountCents: accumulatedCents,
+          lastAmountCents: nextCheckpointAmountCents,
           lastFrame: rawFrame,
         },
       });
@@ -509,7 +531,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
         creditedPesos,
         ...walletBalanceResponse(wallet),
         insertedAmount: hasInsertedAmount ? insertedAmount : 0,
-        accumulatedAmount: hasAccumulatedAmount ? accumulatedAmount : accumulatedCents / 100,
+        accumulatedAmount: hasAccumulatedAmount ? accumulatedAmount : nextCheckpointAmountCents / 100,
         previousAccumulatedAmount: checkpoint.lastAmountCents / 100,
         pulseCount,
         previousPulseCount: checkpoint.lastPulseCount ?? 0,
