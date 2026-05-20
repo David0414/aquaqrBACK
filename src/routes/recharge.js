@@ -425,10 +425,39 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
 
       if (accumulatedCents < checkpoint.lastAmountCents) {
         if (insertedCents > 0) {
-          const wallet = await tx.wallet.findUnique({ where: { userId } });
+          const nextCheckpointAmountCents = checkpoint.lastAmountCents + insertedCents;
+          const wallet = await tx.wallet.upsert({
+            where: { userId },
+            update: { balanceCents: { increment: insertedCents } },
+            create: { userId, balanceCents: insertedCents, bonusBalanceCents: 0 },
+          });
+
+          await tx.telemetryCreditCheckpoint.update({
+            where: { id: checkpoint.id },
+            data: {
+              lastPulseCount: Number.isFinite(pulseCount) && pulseCount >= 0 ? pulseCount : checkpoint.lastPulseCount,
+              lastAmountCents: nextCheckpointAmountCents,
+              lastFrame: rawFrame,
+            },
+          });
+
+          const creditedPesos = insertedCents / 100;
+          await tx.ledgerEntry.create({
+            data: {
+              userId,
+              type: 'CREDIT',
+              amountCents: insertedCents,
+              currency: 'MXN',
+              description: `Recarga por telemetria de moneda ($${creditedPesos} acreditados)`,
+              source: 'telemetry-coin',
+              externalId: `telemetry:${userId}:${machineId}:${rawFrame || `${checkpoint.lastAmountCents}:${insertedCents}`}`,
+              status: 'POSTED',
+            },
+          });
+
           return {
-            creditedCents: 0,
-            creditedPesos: 0,
+            creditedCents: insertedCents,
+            creditedPesos,
             ...walletBalanceResponse(wallet),
             insertedAmount: hasInsertedAmount ? insertedAmount : 0,
             accumulatedAmount: hasAccumulatedAmount ? accumulatedAmount : accumulatedCents / 100,
