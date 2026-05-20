@@ -493,7 +493,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
               currency: 'MXN',
               description: `Recarga por telemetria de moneda ($${creditedPesos} acreditados)`,
               source: 'telemetry-coin',
-              externalId: `telemetry:${userId}:${machineId}:${rawFrame || `${checkpoint.lastAmountCents}:${insertedCents}`}`,
+              externalId: null,
               status: 'POSTED',
             },
           });
@@ -593,7 +593,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
           currency: 'MXN',
           description: `Recarga por telemetria de moneda ($${creditedPesos} acreditados)`,
           source: 'telemetry-coin',
-          externalId: `telemetry:${userId}:${machineId}:${rawFrame || `${checkpoint.lastAmountCents}:${insertedCents}`}`,
+          externalId: null,
           status: 'POSTED',
         },
       });
