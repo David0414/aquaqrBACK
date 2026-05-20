@@ -51,7 +51,8 @@ const DEMO_ACTION_TO_COMMAND = Object.freeze({
   apagar_valvulas_forzado: 'FF',
   reiniciar_sistema: '5A',
   inputs: '01',
-  recarga_monedas: '5C',
+  recargar: '5C',
+  recarga_monedas: '5B',
   qr_inicio: '10',
   litros_5: '11',
   litros_10: '14',
@@ -1449,7 +1450,7 @@ router.post('/demo/control', requireAuthOrMonitorAdmin, async (req, res) => {
           hardwareId,
           machineLocation: req.body?.machineLocation,
         });
-      } else if (action !== 'inputs' && action !== 'recarga_monedas') {
+      } else if (action !== 'inputs' && action !== 'recargar' && action !== 'recarga_monedas') {
         await requireMachineLockOwner(machineId, userId, {
           hardwareId,
           machineLocation: req.body?.machineLocation,
