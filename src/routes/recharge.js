@@ -367,6 +367,49 @@ router.post('/reconcile-pending', requireAuth, async (req, res) => {
 });
 
 /**
+ * POST /api/recharge/telemetry-credit/reset
+ * Body: { machineId: string }
+ * Reinicia el checkpoint de monedas para empezar una sesion de recarga limpia.
+ */
+router.post('/telemetry-credit/reset', requireAuth, async (req, res) => {
+  try {
+    const { userId, email, name } = req.auth;
+    const machineId = normalizeMachineId(req.body?.machineId);
+
+    await ensureUserAndWallet({ userId, email, name });
+
+    const [checkpoint, wallet] = await prisma.$transaction([
+      prisma.telemetryCreditCheckpoint.upsert({
+        where: { userId_machineId: { userId, machineId } },
+        update: {
+          lastPulseCount: 0,
+          lastAmountCents: 0,
+          lastFrame: null,
+        },
+        create: {
+          userId,
+          machineId,
+          lastPulseCount: 0,
+          lastAmountCents: 0,
+          lastFrame: null,
+        },
+      }),
+      prisma.wallet.findUnique({ where: { userId } }),
+    ]);
+
+    return res.json({
+      ok: true,
+      machineId,
+      checkpointId: checkpoint.id,
+      ...walletBalanceResponse(wallet),
+    });
+  } catch (e) {
+    console.error('POST /api/recharge/telemetry-credit/reset error', e);
+    return res.status(500).json({ error: 'No se pudo reiniciar el checkpoint de monedas' });
+  }
+});
+
+/**
  * POST /api/recharge/telemetry-credit
  * Body: { machineId: string, insertedAmount: number, accumulatedAmount?: number, pulseCount?: number, rawFrame?: string }
  * Acredita saldo por telemetria de monedas sin tocar la logica Stripe.
@@ -398,7 +441,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
           machineId,
           lastPulseCount: 0,
           lastAmountCents: 0,
-          lastFrame: rawFrame,
+          lastFrame: null,
         },
       });
 
