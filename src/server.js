@@ -33,10 +33,41 @@ const profileRoutes  = require('./routes/profile');
 const app = express();
 
 // CORS
-app.use(cors({
-  origin: process.env.APP_BASE_URL || 'http://localhost:5173',
+const defaultAllowedOrigins = [
+  'https://aquaqr-front.vercel.app',
+  'http://localhost:5173',
+  'http://localhost:3000',
+];
+
+function parseAllowedOrigins() {
+  const configuredOrigins = [
+    process.env.APP_BASE_URL,
+    process.env.FRONTEND_URL,
+    process.env.FRONTEND_ORIGIN,
+    process.env.CORS_ORIGINS,
+  ]
+    .filter(Boolean)
+    .flatMap((value) => String(value).split(','))
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  return new Set([...defaultAllowedOrigins, ...configuredOrigins]);
+}
+
+const allowedOrigins = parseAllowedOrigins();
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.has(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error(`Origin not allowed by CORS: ${origin}`));
+  },
   credentials: true,
-}));
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 // 1) WEBHOOKS con RAW (antes de express.json)
 app.use('/webhooks', express.raw({ type: 'application/json' }), webhookRouter);

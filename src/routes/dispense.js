@@ -1495,13 +1495,21 @@ router.get('/demo/monitor', requireAuthOrMonitorAdmin, async (_req, res) => {
     const out = await readMonitorFrame();
     return res.json({
       ok: true,
+      connected: true,
       source: 'monitor',
       ...out,
     });
   } catch (e) {
     console.error('GET /api/dispense/demo/monitor error', e);
-    return res.status(502).json({
-      error: 'No se pudo escuchar el monitor waterserver',
+    return res.json({
+      ok: true,
+      connected: false,
+      source: 'monitor',
+      response: null,
+      lines: [],
+      host: controlHost(),
+      port: monitorPort(),
+      error: 'MONITOR_UNAVAILABLE',
       detail: e.message,
     });
   }
