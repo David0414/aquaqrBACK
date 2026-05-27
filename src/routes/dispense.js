@@ -539,6 +539,35 @@ function controlTimeoutMs() {
   return Number.isFinite(raw) ? raw : 10000;
 }
 
+function waterserverReconnectingError(message, cause) {
+  const error = new Error(message || 'La maquina se esta reconectando');
+  error.code = 'WATERSERVER_RECONNECTING';
+  error.statusCode = 503;
+  error.reconnecting = true;
+  if (cause) error.cause = cause;
+  return error;
+}
+
+function isWaterserverReconnectingError(error) {
+  return Boolean(
+    error?.code === 'WATERSERVER_RECONNECTING'
+    || error?.reconnecting
+    || /DEVICE_RECONNECTING|ESP32\/PIC\/GSM no conectado|waterserver/i.test(String(error?.message || ''))
+  );
+}
+
+function sendWaterserverReconnecting(res, error) {
+  return res.status(503).json({
+    ok: false,
+    connected: false,
+    reconnecting: true,
+    error: 'WATERSERVER_RECONNECTING',
+    message: 'La maquina se esta reconectando. Intenta de nuevo en unos segundos.',
+    detail: error?.message || 'Waterserver no disponible',
+    retryAfterMs: 3000,
+  });
+}
+
 function sanitizePulsesPerLiter(value, fallback = DEFAULT_PULSES_PER_LITER) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -568,6 +597,19 @@ function monitorTimeoutMs() {
 function monitorFrameMaxAgeMs() {
   const raw = Number.parseInt(process.env.WATERSERVER_MONITOR_MAX_AGE_MS || '3000', 10);
   return Number.isFinite(raw) ? raw : 3000;
+}
+
+function monitorConnectionSnapshot() {
+  const latestAt = monitorState.latestFrame?.receivedAt || 0;
+  const latestAgeMs = latestAt ? Date.now() - latestAt : null;
+  const hasFreshFrame = latestAgeMs !== null && latestAgeMs <= monitorFrameMaxAgeMs();
+
+  return {
+    connected: Boolean(monitorState.socket),
+    reconnecting: !monitorState.socket || !hasFreshFrame,
+    latestFrameAt: latestAt ? new Date(latestAt).toISOString() : null,
+    latestFrameAgeMs: latestAgeMs,
+  };
 }
 
 function sendControlCommand(command) {
@@ -611,18 +653,18 @@ function sendControlCommand(command) {
     });
 
     socket.on('timeout', () => {
-      finish(new Error(`Timeout al conectar/controlar waterserver (${timeoutMs}ms)`));
+      finish(waterserverReconnectingError(`Timeout al conectar/controlar waterserver (${timeoutMs}ms)`));
     });
 
     socket.on('error', (err) => {
-      finish(err);
+      finish(waterserverReconnectingError(err.message, err));
     });
 
     socket.on('close', () => {
       if (settled) return;
       if (buffer.trim().length > 0) lines.push(buffer.trim());
       if (lines.length === 0) {
-        finish(new Error('Sin respuesta del waterserver'));
+        finish(waterserverReconnectingError('Sin respuesta del waterserver'));
         return;
       }
       finish(null, {
@@ -653,6 +695,10 @@ function enqueueControlCommand(command) {
 function assertWaterserverAccepted(out) {
   const responseText = String(out?.response || '').trim();
   if (/^ERR\b/i.test(responseText)) {
+    if (/DEVICE_RECONNECTING|ESP32\/PIC\/GSM no conectado/i.test(responseText)) {
+      throw waterserverReconnectingError(responseText);
+    }
+
     const error = new Error(responseText.replace(/^ERR\s*/i, '') || 'Waterserver rechazo el comando');
     error.statusCode = 502;
     throw error;
@@ -1051,6 +1097,10 @@ router.post('/', requireAuth, async (req, res) => {
       return sendMachineBusy(res, e);
     }
 
+    if (isWaterserverReconnectingError(e)) {
+      return sendWaterserverReconnecting(res, e);
+    }
+
     console.error('POST /api/dispense error', e);
     return res.status(500).json({ error: 'No se pudo iniciar el dispensado' });
   }
@@ -1283,6 +1333,7 @@ router.get('/active', requireAuth, async (req, res) => {
     }
 
     const stageCode = parseMonitorTelemetry(monitorState.latestFrame?.response)?.currentStageCode || null;
+    const waterserver = monitorConnectionSnapshot();
     const dispense = lock.txId
       ? await prisma.dispense.findFirst({
           where: { id: lock.txId, userId },
@@ -1326,6 +1377,8 @@ router.get('/active', requireAuth, async (req, res) => {
       hardwareId: lock.hardwareId,
       selectedLiters,
       stageCode,
+      waterserver,
+      reconnecting: waterserver.reconnecting,
       tx,
       nextPath: activePathForStage(stageCode, Boolean(tx)),
       expiresAt: lock.expiresAt,
@@ -1404,6 +1457,10 @@ router.post('/active/cancel', requireAuth, async (req, res) => {
       activeCancelRequestsInFlight.delete(requestKey);
     }
   } catch (e) {
+    if (isWaterserverReconnectingError(e)) {
+      return sendWaterserverReconnecting(res, e);
+    }
+
     console.error('POST /api/dispense/active/cancel error', e);
     return res.status(e.statusCode || 500).json({
       error: e.code || 'ACTIVE_CANCEL_FAILED',
@@ -1437,11 +1494,17 @@ router.get('/quote', (req, res) => {
 /* Body: { action: 'bomba_on' | ... }                                            */
 /* ----------------------------------------------------------------------------- */
 router.post('/demo/control', requireAuthOrMonitorAdmin, async (req, res) => {
+  let action = '';
+  let machineId = null;
+  let requestUserId = null;
+  let shouldReleaseQrLockOnReconnect = false;
+
   try {
-    const action = String(req.body?.action || '').trim().toLowerCase();
-    const machineId = normalizeMachineId(req.body?.machineId);
+    action = String(req.body?.action || '').trim().toLowerCase();
+    machineId = normalizeMachineId(req.body?.machineId);
     const hardwareId = normalizeHardwareId(req.body?.hardwareId);
     const { userId } = req.auth;
+    requestUserId = userId;
 
     await ensureUserAndWallet(userId);
     if (!req.auth?.monitorAdmin) {
@@ -1450,6 +1513,7 @@ router.post('/demo/control', requireAuthOrMonitorAdmin, async (req, res) => {
           hardwareId,
           machineLocation: req.body?.machineLocation,
         });
+        shouldReleaseQrLockOnReconnect = true;
       } else if (action !== 'inputs' && action !== 'recargar' && action !== 'recarga_monedas') {
         await requireMachineLockOwner(machineId, userId, {
           hardwareId,
@@ -1473,6 +1537,15 @@ router.post('/demo/control', requireAuthOrMonitorAdmin, async (req, res) => {
     const out = await sendDemoAction(action, req.body?.pulsesPerLiter);
     return res.json({ ok: true, ...out });
   } catch (e) {
+    if (isWaterserverReconnectingError(e)) {
+      if (shouldReleaseQrLockOnReconnect && machineId && requestUserId) {
+        releaseMachineLock(machineId, requestUserId).catch((releaseError) => {
+          console.error('[Dispense] Error liberando reserva tras reconexion waterserver', releaseError);
+        });
+      }
+      return sendWaterserverReconnecting(res, e);
+    }
+
     if (e.code === 'MACHINE_BUSY') {
       return sendMachineBusy(res, e);
     }
@@ -1494,17 +1567,23 @@ router.post('/demo/control', requireAuthOrMonitorAdmin, async (req, res) => {
 router.get('/demo/monitor', requireAuthOrMonitorAdmin, async (_req, res) => {
   try {
     const out = await readMonitorFrame();
+    const waterserver = monitorConnectionSnapshot();
     return res.json({
       ok: true,
       connected: true,
+      reconnecting: false,
+      waterserver,
       source: 'monitor',
       ...out,
     });
   } catch (e) {
     console.error('GET /api/dispense/demo/monitor error', e);
+    const waterserver = monitorConnectionSnapshot();
     return res.json({
       ok: true,
       connected: false,
+      reconnecting: true,
+      waterserver,
       source: 'monitor',
       response: null,
       lines: [],
@@ -1525,5 +1604,3 @@ setImmediate(() => {
 });
 
 module.exports = router;
-
-
