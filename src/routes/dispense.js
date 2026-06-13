@@ -30,7 +30,7 @@ const DEFAULT_PULSES_PER_LITER = intFromEnv('FLOWMETER_PULSES_PER_LITER', 360);
 let currentPulsesPerLiter = DEFAULT_PULSES_PER_LITER;
 const MACHINE_LOCK_TTL_MS = intFromEnv('MACHINE_LOCK_TTL_MS', 20 * 60 * 1000);
 const IDLE_LOCK_RELEASE_MS = intFromEnv('IDLE_LOCK_RELEASE_MS', 8000);
-const SINGLE_MACHINE_MODE = String(process.env.SINGLE_MACHINE_MODE || 'true').toLowerCase() !== 'false';
+const SINGLE_MACHINE_MODE = String(process.env.SINGLE_MACHINE_MODE || 'false').toLowerCase() === 'true';
 const DEFAULT_MACHINE_HARDWARE_ID = normalizeHardwareId(process.env.DEFAULT_MACHINE_HARDWARE_ID || '01');
 const MONITOR_ADMIN_USER = process.env.MONITOR_ADMIN_USER || 'admin';
 const MONITOR_ADMIN_PASSWORD = process.env.MONITOR_ADMIN_PASSWORD || '123';
