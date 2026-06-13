@@ -61,6 +61,7 @@ const DEMO_ACTION_TO_COMMAND = Object.freeze({
   enjuague: '12',
   inicio_dispensado: '13',
 });
+const VALID_PROCESS_STAGE_CODES = new Set(['01', '02', '03', '04', '05', '06', '07', '08', '09']);
 
 /* ----------------------------------------------------------------------------- */
 /* Utils                                                                         */
@@ -627,8 +628,8 @@ function monitorTimeoutMs() {
 }
 
 function monitorFrameMaxAgeMs() {
-  const raw = Number.parseInt(process.env.WATERSERVER_MONITOR_MAX_AGE_MS || '3000', 10);
-  return Number.isFinite(raw) ? raw : 3000;
+  const raw = Number.parseInt(process.env.WATERSERVER_MONITOR_MAX_AGE_MS || '15000', 10);
+  return Number.isFinite(raw) ? raw : 15000;
 }
 
 function monitorConnectionSnapshot(hardwareId) {
@@ -787,12 +788,23 @@ function extractMonitorFrameBytes(line) {
 function parseMonitorTelemetry(line) {
   const bytes = extractMonitorFrameBytes(line);
   if (!bytes) return null;
+  const pumpByte = normalizeHardwareId(bytes[8]) || '00';
+  const stageByte = normalizeHardwareId(bytes[9]) || '00';
+  const currentStageCode = stageByte !== '00'
+    ? stageByte
+    : VALID_PROCESS_STAGE_CODES.has(pumpByte)
+      ? pumpByte
+      : '00';
+  const pumpStateByte = currentStageCode === pumpByte && stageByte === '00'
+    ? '00'
+    : pumpByte;
+
   return {
     machineHardwareId: normalizeHardwareId(bytes[1]),
-    currentStageCode: normalizeHardwareId(bytes[9]) || '00',
+    currentStageCode,
     fillValveOn: normalizeHardwareId(bytes[6]) !== '00',
     rinseValveOn: normalizeHardwareId(bytes[7]) !== '00',
-    pumpOn: normalizeHardwareId(bytes[8]) !== '00',
+    pumpOn: pumpStateByte !== '00',
     rawFrame: bytes.join('-'),
   };
 }
@@ -837,6 +849,7 @@ function handleMonitorLine(line) {
     port: monitorPort(),
     receivedAt: Date.now(),
     hardwareId: parsed?.machineHardwareId || null,
+    telemetry: parsed,
   };
 
   if (parsed?.machineHardwareId) {
