@@ -1714,7 +1714,19 @@ router.post('/demo/control', requireAuthOrMonitorAdmin, async (req, res) => {
 });
 
 router.get('/demo/monitor', requireAuthOrMonitorAdmin, async (req, res) => {
-  const hardwareId = controlHardwareId(req.query?.hardwareId, req.query?.machineId);
+  let hardwareId = controlHardwareId(req.query?.hardwareId, req.query?.machineId);
+
+  if (!req.auth?.monitorAdmin && req.auth?.userId) {
+    const activeLock = await resolveOwnLockForCommand(
+      req.auth.userId,
+      'monitor',
+      req.query?.machineId,
+      hardwareId
+    );
+    if (activeLock?.hardwareId) {
+      hardwareId = activeLock.hardwareId;
+    }
+  }
 
   try {
     const out = await readMonitorFrame(hardwareId);
