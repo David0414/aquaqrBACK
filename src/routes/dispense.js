@@ -167,7 +167,8 @@ function effectiveHardwareId(value) {
 
 function hardwareIdFromMachineId(value) {
   const machineId = String(value || '').trim();
-  return /^[0-9A-Fa-f]{1,2}$/.test(machineId) ? normalizeHardwareId(machineId) : null;
+  const compact = machineId.toUpperCase().replace(/[^0-9A-F]/g, '');
+  return compact ? normalizeHardwareId(compact) : null;
 }
 
 function controlHardwareId(hardwareIdValue, machineIdValue) {
@@ -1655,4 +1656,3 @@ setImmediate(() => {
 });
 
 module.exports = router;
-
