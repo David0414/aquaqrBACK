@@ -228,6 +228,62 @@ async function findOwnMachineLock(machineId, hardwareId, userId) {
   return locks.find((lock) => isActiveLock(lock, now)) || null;
 }
 
+async function findOwnActiveMachineLocks(userId) {
+  const now = new Date();
+  return prisma.machineLock.findMany({
+    where: {
+      userId,
+      expiresAt: { gt: now },
+    },
+    orderBy: { updatedAt: 'desc' },
+  });
+}
+
+function telemetryStageForHardware(hardwareId) {
+  const frame = latestMonitorFrameForHardware(hardwareId);
+  return parseMonitorTelemetry(frame?.response)?.currentStageCode || null;
+}
+
+function preferredStagesForAction(action) {
+  switch (action) {
+    case 'litros_5':
+    case 'litros_10':
+    case 'litros_20':
+      return new Set(['01', '02', '03']);
+    case 'enjuague':
+      return new Set(['02', '03', '04', '05', '06']);
+    case 'inicio_dispensado':
+      return new Set(['03', '04', '05', '06']);
+    default:
+      return new Set(['01', '02', '03', '04', '05', '06', '07']);
+  }
+}
+
+async function resolveOwnLockForCommand(userId, action, requestedMachineId, requestedHardwareId) {
+  const locks = await findOwnActiveMachineLocks(userId);
+  if (locks.length === 0) return null;
+
+  const requestedHw = normalizeHardwareId(requestedHardwareId);
+  const requestedMachine = normalizeMachineId(requestedMachineId);
+  const preferredStages = preferredStagesForAction(action);
+
+  const withStage = locks.map((lock) => ({
+    lock,
+    stageCode: telemetryStageForHardware(lock.hardwareId),
+  }));
+
+  const activeByStage = withStage.find((item) => preferredStages.has(item.stageCode));
+  if (activeByStage) return activeByStage.lock;
+
+  const exact = withStage.find((item) => (
+    (requestedHw && normalizeHardwareId(item.lock.hardwareId) === requestedHw)
+    || (requestedMachine && normalizeMachineId(item.lock.machineId) === requestedMachine)
+  ));
+  if (exact) return exact.lock;
+
+  return locks[0];
+}
+
 function throwMachineBusy(lock, userId) {
   const error = new Error(
     lock.userId === userId
@@ -1587,7 +1643,7 @@ router.post('/demo/control', requireAuthOrMonitorAdmin, async (req, res) => {
   try {
     action = String(req.body?.action || '').trim().toLowerCase();
     machineId = normalizeMachineId(req.body?.machineId);
-    const hardwareId = controlHardwareId(req.body?.hardwareId, machineId);
+    let hardwareId = controlHardwareId(req.body?.hardwareId, machineId);
     const { userId } = req.auth;
     requestUserId = userId;
 
@@ -1600,11 +1656,19 @@ router.post('/demo/control', requireAuthOrMonitorAdmin, async (req, res) => {
         });
         shouldReleaseQrLockOnReconnect = true;
       } else if (action !== 'inputs' && action !== 'recargar' && action !== 'recarga_monedas') {
-        await requireMachineLockOwner(machineId, userId, {
+        const activeLock = await resolveOwnLockForCommand(userId, action, machineId, hardwareId);
+        if (activeLock) {
+          machineId = activeLock.machineId || machineId;
+          hardwareId = activeLock.hardwareId || hardwareId;
+        }
+
+        const lock = await requireMachineLockOwner(machineId, userId, {
           hardwareId,
           machineLocation: req.body?.machineLocation,
           selectedLiters: litersFromAction(action),
         });
+        if (lock?.hardwareId) hardwareId = lock.hardwareId;
+        if (lock?.machineId) machineId = lock.machineId;
       }
     }
 
