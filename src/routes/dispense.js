@@ -28,6 +28,7 @@ const PRICE_PER_LITER_CENTS = Number.isFinite(ENV_PPL)
   : Math.round(PRICE_PER_GARRAFON_CENTS / GARRAFON_LITERS);
 const DEFAULT_PULSES_PER_LITER = intFromEnv('FLOWMETER_PULSES_PER_LITER', 360);
 let currentPulsesPerLiter = DEFAULT_PULSES_PER_LITER;
+const pulsesPerLiterByHardwareId = new Map();
 const MACHINE_LOCK_TTL_MS = intFromEnv('MACHINE_LOCK_TTL_MS', 20 * 60 * 1000);
 const IDLE_LOCK_RELEASE_MS = intFromEnv('IDLE_LOCK_RELEASE_MS', 8000);
 const SINGLE_MACHINE_MODE = String(process.env.SINGLE_MACHINE_MODE || 'false').toLowerCase() === 'true';
@@ -591,10 +592,27 @@ function updateCurrentPulsesPerLiter(value) {
   return currentPulsesPerLiter;
 }
 
+function getPulsesPerLiterForHardware(hardwareId) {
+  const normalized = normalizeHardwareId(hardwareId);
+  if (!normalized) return currentPulsesPerLiter;
+  return pulsesPerLiterByHardwareId.get(normalized) || currentPulsesPerLiter;
+}
+
+function updatePulsesPerLiterForHardware(value, hardwareId) {
+  const normalized = normalizeHardwareId(hardwareId);
+  const nextValue = sanitizePulsesPerLiter(value, normalized ? getPulsesPerLiterForHardware(normalized) : currentPulsesPerLiter);
+  if (normalized) {
+    pulsesPerLiterByHardwareId.set(normalized, nextValue);
+  } else {
+    currentPulsesPerLiter = nextValue;
+  }
+  return nextValue;
+}
+
 function buildControlCommandLine(command, pulsesPerLiter, hardwareIdValue) {
-  const pulses = sanitizePulsesPerLiter(pulsesPerLiter, currentPulsesPerLiter);
   const commandText = String(command || '').trim().toUpperCase();
   const hardwareId = effectiveHardwareId(hardwareIdValue);
+  const pulses = sanitizePulsesPerLiter(pulsesPerLiter, getPulsesPerLiterForHardware(hardwareId));
   return hardwareId ? `HW ${hardwareId} ${commandText} ${pulses}` : `${commandText} ${pulses}`;
 }
 
@@ -1027,7 +1045,7 @@ async function sendDemoAction(action, pulsesPerLiter, hardwareId) {
     throw error;
   }
 
-  const safePulsesPerLiter = updateCurrentPulsesPerLiter(pulsesPerLiter);
+  const safePulsesPerLiter = updatePulsesPerLiterForHardware(pulsesPerLiter, hardwareId);
   const commandLine = buildControlCommandLine(command, safePulsesPerLiter, hardwareId);
   const out = await enqueueControlCommand(commandLine);
   assertWaterserverAccepted(out);
@@ -1338,25 +1356,30 @@ router.get('/history', requireAuth, async (req, res) => {
 /* ----------------------------------------------------------------------------- */
 /* GET /api/dispense/config (pública)                                            */
 /* ----------------------------------------------------------------------------- */
-router.get('/config', (_req, res) => {
+router.get('/config', (req, res) => {
   const optionsLiters = Array.from(ALLOWED_LITERS);
+  const hardwareId = controlHardwareId(req.query?.hardwareId, req.query?.machineId);
+  const pulsesPerLiter = getPulsesPerLiterForHardware(hardwareId);
   res.json({
     currency: CURRENCY,
     garrafonLiters: GARRAFON_LITERS,
     pricePerGarrafonCents: PRICE_PER_GARRAFON_CENTS,
     pricePerLiterCents: PRICE_PER_LITER_CENTS,
     defaultPulsesPerLiter: DEFAULT_PULSES_PER_LITER,
-    pulsesPerLiter: currentPulsesPerLiter,
+    pulsesPerLiter,
+    hardwareId,
     optionsLiters,
     allowedLiters: optionsLiters,
   });
 });
 
 router.post('/config/pulses', requireAuthOrMonitorAdmin, (req, res) => {
-  const pulsesPerLiter = updateCurrentPulsesPerLiter(req.body?.pulsesPerLiter);
+  const hardwareId = controlHardwareId(req.body?.hardwareId, req.body?.machineId);
+  const pulsesPerLiter = updatePulsesPerLiterForHardware(req.body?.pulsesPerLiter, hardwareId);
   return res.json({
     ok: true,
     pulsesPerLiter,
+    hardwareId,
     defaultPulsesPerLiter: DEFAULT_PULSES_PER_LITER,
   });
 });
@@ -1461,7 +1484,7 @@ router.post('/active/cancel', requireAuth, async (req, res) => {
     const requestKey = activeCancelKey(lock);
     if (!activeCancelRequestsInFlight.has(requestKey)) {
       activeCancelRequestsInFlight.set(requestKey, (async () => {
-        const safePulsesPerLiter = updateCurrentPulsesPerLiter(req.body?.pulsesPerLiter);
+        const safePulsesPerLiter = updatePulsesPerLiterForHardware(req.body?.pulsesPerLiter, lock.hardwareId);
         if (lock.txId) cancelInFlight.add(lock.txId);
 
         let cancelResult = null;
