@@ -165,6 +165,17 @@ function effectiveHardwareId(value) {
   return normalizeHardwareId(value) || (SINGLE_MACHINE_MODE ? DEFAULT_MACHINE_HARDWARE_ID : null);
 }
 
+function hardwareIdFromMachineId(value) {
+  const machineId = String(value || '').trim();
+  return /^[0-9A-Fa-f]{1,2}$/.test(machineId) ? normalizeHardwareId(machineId) : null;
+}
+
+function controlHardwareId(hardwareIdValue, machineIdValue) {
+  return normalizeHardwareId(hardwareIdValue)
+    || hardwareIdFromMachineId(machineIdValue)
+    || (SINGLE_MACHINE_MODE ? DEFAULT_MACHINE_HARDWARE_ID : null);
+}
+
 function machineLockExpiresAt() {
   return new Date(Date.now() + MACHINE_LOCK_TTL_MS);
 }
@@ -579,9 +590,11 @@ function updateCurrentPulsesPerLiter(value) {
   return currentPulsesPerLiter;
 }
 
-function buildControlCommandLine(command, pulsesPerLiter) {
+function buildControlCommandLine(command, pulsesPerLiter, hardwareIdValue) {
   const pulses = sanitizePulsesPerLiter(pulsesPerLiter, currentPulsesPerLiter);
-  return `${String(command || '').trim().toUpperCase()} ${pulses}`;
+  const commandText = String(command || '').trim().toUpperCase();
+  const hardwareId = effectiveHardwareId(hardwareIdValue);
+  return hardwareId ? `HW ${hardwareId} ${commandText} ${pulses}` : `${commandText} ${pulses}`;
 }
 
 function monitorPort() {
@@ -599,14 +612,16 @@ function monitorFrameMaxAgeMs() {
   return Number.isFinite(raw) ? raw : 3000;
 }
 
-function monitorConnectionSnapshot() {
-  const latestAt = monitorState.latestFrame?.receivedAt || 0;
+function monitorConnectionSnapshot(hardwareId) {
+  const latestFrame = latestMonitorFrameForHardware(hardwareId);
+  const latestAt = latestFrame?.receivedAt || 0;
   const latestAgeMs = latestAt ? Date.now() - latestAt : null;
   const hasFreshFrame = latestAgeMs !== null && latestAgeMs <= monitorFrameMaxAgeMs();
 
   return {
     connected: Boolean(monitorState.socket),
     reconnecting: !monitorState.socket || !hasFreshFrame,
+    hardwareId: normalizeHardwareId(hardwareId) || latestFrame?.hardwareId || null,
     latestFrameAt: latestAt ? new Date(latestAt).toISOString() : null,
     latestFrameAgeMs: latestAgeMs,
   };
@@ -724,6 +739,7 @@ const monitorState = {
   socket: null,
   buffer: '',
   latestFrame: null,
+  latestFrameByHardwareId: new Map(),
   waiters: [],
   reconnectTimer: null,
   connecting: false,
@@ -763,8 +779,19 @@ function parseMonitorTelemetry(line) {
 }
 
 function resolveMonitorWaiters(frame) {
+  const pending = [];
+  const hardwareId = normalizeHardwareId(frame?.hardwareId);
   const waiters = monitorState.waiters.splice(0);
-  waiters.forEach((waiter) => waiter.resolve(frame));
+
+  waiters.forEach((waiter) => {
+    if (!waiter.hardwareId || waiter.hardwareId === hardwareId) {
+      waiter.resolve(frame);
+    } else {
+      pending.push(waiter);
+    }
+  });
+
+  monitorState.waiters = pending;
 }
 
 function rejectMonitorWaiters(error) {
@@ -790,7 +817,13 @@ function handleMonitorLine(line) {
     host: controlHost(),
     port: monitorPort(),
     receivedAt: Date.now(),
+    hardwareId: parsed?.machineHardwareId || null,
   };
+
+  if (parsed?.machineHardwareId) {
+    monitorState.latestFrameByHardwareId.set(parsed.machineHardwareId, monitorState.latestFrame);
+  }
+
   resolveMonitorWaiters(monitorState.latestFrame);
 
   maybeCompleteDispenseFromTelemetry(parsed).catch((error) => {
@@ -844,15 +877,23 @@ function ensureMonitorConnection() {
   socket.connect(port, host);
 }
 
-function readMonitorFrame() {
+function latestMonitorFrameForHardware(hardwareId) {
+  const normalized = normalizeHardwareId(hardwareId);
+  if (!normalized) return monitorState.latestFrame;
+  return monitorState.latestFrameByHardwareId.get(normalized) || null;
+}
+
+function readMonitorFrame(hardwareId) {
   const timeoutMs = monitorTimeoutMs();
+  const normalizedHardwareId = normalizeHardwareId(hardwareId);
   ensureMonitorConnection();
+  const latestFrame = latestMonitorFrameForHardware(normalizedHardwareId);
 
   if (
-    monitorState.latestFrame
-    && Date.now() - monitorState.latestFrame.receivedAt <= monitorFrameMaxAgeMs()
+    latestFrame
+    && Date.now() - latestFrame.receivedAt <= monitorFrameMaxAgeMs()
   ) {
-    return Promise.resolve(monitorState.latestFrame);
+    return Promise.resolve(latestFrame);
   }
 
   return new Promise((resolve, reject) => {
@@ -866,6 +907,7 @@ function readMonitorFrame() {
         reject(error);
       },
       timer: null,
+      hardwareId: normalizedHardwareId,
     };
     waiter.timer = setTimeout(() => {
       monitorState.waiters = monitorState.waiters.filter((item) => item !== waiter);
@@ -975,7 +1017,7 @@ async function maybeReleaseIdlePreparatoryLocks(parsed) {
   }
 }
 
-async function sendDemoAction(action, pulsesPerLiter) {
+async function sendDemoAction(action, pulsesPerLiter, hardwareId) {
   const command = DEMO_ACTION_TO_COMMAND[action];
   if (!command) {
     const error = new Error('Accion demo invalida');
@@ -985,7 +1027,7 @@ async function sendDemoAction(action, pulsesPerLiter) {
   }
 
   const safePulsesPerLiter = updateCurrentPulsesPerLiter(pulsesPerLiter);
-  const commandLine = buildControlCommandLine(command, safePulsesPerLiter);
+  const commandLine = buildControlCommandLine(command, safePulsesPerLiter, hardwareId);
   const out = await enqueueControlCommand(commandLine);
   assertWaterserverAccepted(out);
   return {
@@ -1026,10 +1068,11 @@ router.post('/', requireAuth, async (req, res) => {
     const pricePerLiterCents = PRICE_PER_LITER_CENTS;
     const totalCents = totalForLiters(ltrs);
     const safeMachineId = normalizeMachineId(machineId);
+    const commandHardwareId = controlHardwareId(hardwareId, safeMachineId);
 
     await ensureUserAndWallet(userId);
     await requireMachineLockOwner(safeMachineId, userId, {
-      hardwareId,
+      hardwareId: commandHardwareId,
       machineLocation: location,
       selectedLiters: ltrs,
     });
@@ -1054,7 +1097,11 @@ router.post('/', requireAuth, async (req, res) => {
     // Inicia el llenado en el equipo, pero no descuenta saldo todavia.
     // El cobro se confirma cuando la telemetria reporta proceso finalizado.
     const safePulsesPerLiter = sanitizePulsesPerLiter(pulsesPerLiter);
-    const commandOut = await enqueueControlCommand(buildControlCommandLine(DEMO_ACTION_TO_COMMAND.inicio_dispensado, safePulsesPerLiter));
+    const commandOut = await enqueueControlCommand(buildControlCommandLine(
+      DEMO_ACTION_TO_COMMAND.inicio_dispensado,
+      safePulsesPerLiter,
+      commandHardwareId
+    ));
     assertWaterserverAccepted(commandOut);
 
     const dispense = await prisma.dispense.create({
@@ -1072,7 +1119,7 @@ router.post('/', requireAuth, async (req, res) => {
 
     await acquireMachineLock(safeMachineId, userId, {
       txId: dispense.id,
-      hardwareId,
+      hardwareId: commandHardwareId,
       machineLocation: location,
       selectedLiters: ltrs,
     });
@@ -1332,8 +1379,9 @@ router.get('/active', requireAuth, async (req, res) => {
       return res.json({ ok: true, active: false });
     }
 
-    const stageCode = parseMonitorTelemetry(monitorState.latestFrame?.response)?.currentStageCode || null;
-    const waterserver = monitorConnectionSnapshot();
+    const telemetryFrame = latestMonitorFrameForHardware(lock.hardwareId);
+    const stageCode = parseMonitorTelemetry(telemetryFrame?.response)?.currentStageCode || null;
+    const waterserver = monitorConnectionSnapshot(lock.hardwareId);
     const dispense = lock.txId
       ? await prisma.dispense.findFirst({
           where: { id: lock.txId, userId },
@@ -1418,7 +1466,7 @@ router.post('/active/cancel', requireAuth, async (req, res) => {
         let cancelResult = null;
         try {
           const resetOut = await enqueueControlCommand(
-            buildControlCommandLine(DEMO_ACTION_TO_COMMAND.reiniciar_sistema, safePulsesPerLiter)
+            buildControlCommandLine(DEMO_ACTION_TO_COMMAND.reiniciar_sistema, safePulsesPerLiter, lock.hardwareId)
           );
           assertWaterserverAccepted(resetOut);
 
@@ -1502,7 +1550,7 @@ router.post('/demo/control', requireAuthOrMonitorAdmin, async (req, res) => {
   try {
     action = String(req.body?.action || '').trim().toLowerCase();
     machineId = normalizeMachineId(req.body?.machineId);
-    const hardwareId = normalizeHardwareId(req.body?.hardwareId);
+    const hardwareId = controlHardwareId(req.body?.hardwareId, machineId);
     const { userId } = req.auth;
     requestUserId = userId;
 
@@ -1534,7 +1582,7 @@ router.post('/demo/control', requireAuthOrMonitorAdmin, async (req, res) => {
       });
     }
 
-    const out = await sendDemoAction(action, req.body?.pulsesPerLiter);
+    const out = await sendDemoAction(action, req.body?.pulsesPerLiter, hardwareId);
     return res.json({ ok: true, ...out });
   } catch (e) {
     if (isWaterserverReconnectingError(e)) {
@@ -1564,10 +1612,12 @@ router.post('/demo/control', requireAuthOrMonitorAdmin, async (req, res) => {
   }
 });
 
-router.get('/demo/monitor', requireAuthOrMonitorAdmin, async (_req, res) => {
+router.get('/demo/monitor', requireAuthOrMonitorAdmin, async (req, res) => {
+  const hardwareId = controlHardwareId(req.query?.hardwareId, req.query?.machineId);
+
   try {
-    const out = await readMonitorFrame();
-    const waterserver = monitorConnectionSnapshot();
+    const out = await readMonitorFrame(hardwareId);
+    const waterserver = monitorConnectionSnapshot(hardwareId);
     return res.json({
       ok: true,
       connected: true,
@@ -1578,7 +1628,7 @@ router.get('/demo/monitor', requireAuthOrMonitorAdmin, async (_req, res) => {
     });
   } catch (e) {
     console.error('GET /api/dispense/demo/monitor error', e);
-    const waterserver = monitorConnectionSnapshot();
+    const waterserver = monitorConnectionSnapshot(hardwareId);
     return res.json({
       ok: true,
       connected: false,
@@ -1589,6 +1639,7 @@ router.get('/demo/monitor', requireAuthOrMonitorAdmin, async (_req, res) => {
       lines: [],
       host: controlHost(),
       port: monitorPort(),
+      hardwareId,
       error: 'MONITOR_UNAVAILABLE',
       detail: e.message,
     });
