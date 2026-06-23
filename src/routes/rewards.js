@@ -153,6 +153,13 @@ router.get('/summary', requireAuth, async (req, res) => {
     const welcomeAvailable = Boolean(welcomeCredit) && rechargeCount === 0 && dispenseCount === 0;
     const welcomeUsed = Boolean(welcomeCredit) && !welcomeAvailable;
     const activeMembershipByKey = new Map(activeMembershipCredits.map((item) => [item.promotionKey, item]));
+    const isPromotionEnabledForUser = (promotion) => {
+      if (!isMonthlySelectablePromotion(promotion)) return Boolean(promotion.isActive);
+      if (promotion.kind === 'membership') {
+        return selectionState.selectedPromotionKeys.includes(promotion.key) && activeMembershipByKey.has(promotion.key);
+      }
+      return selectionState.selectedPromotionKeys.includes(promotion.key);
+    };
 
     return res.json({
       wallet: {
@@ -185,9 +192,7 @@ router.get('/summary', requireAuth, async (req, res) => {
         isActive: Boolean(promotion.isActive),
         requiresMonthlySelection: isMonthlySelectablePromotion(promotion),
         isSelectedForMonth: selectionState.selectedPromotionKeys.includes(promotion.key),
-        isEnabledForUserThisMonth: isMonthlySelectablePromotion(promotion)
-          ? selectionState.selectedPromotionKeys.includes(promotion.key)
-          : Boolean(promotion.isActive),
+        isEnabledForUserThisMonth: isPromotionEnabledForUser(promotion),
         config: promotion.config || {},
         status: promotion.key === 'welcome_first_garrafon'
           ? {
@@ -199,7 +204,7 @@ router.get('/summary', requireAuth, async (req, res) => {
           : promotion.kind === 'membership'
             ? {
                 purchased: activeMembershipByKey.has(promotion.key),
-                label: activeMembershipByKey.has(promotion.key) ? 'Pagada' : 'Pendiente de pago',
+                label: activeMembershipByKey.has(promotion.key) ? 'Pagada' : 'Pagar para activar',
                 creditAmountCents: Number(activeMembershipByKey.get(promotion.key)?.amountCents || 0),
                 activeUntil: selectionState.expiresAt,
               }
