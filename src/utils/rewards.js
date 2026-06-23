@@ -237,31 +237,7 @@ function getMembershipBonusCents(amountCents, promotion, pricePerGarrafonCents =
 }
 
 function getRechargeBonusOffer(amountCents, selectedPromotionKeys = [], promotions = [], options = {}) {
-  const pricePerGarrafonCents = Number(options.pricePerGarrafonCents || PRICE_PER_GARRAFON_CENTS);
   const selected = new Set(selectedPromotionKeys || []);
-  const selectedMembership = (promotions || [])
-    .filter((promotion) => promotion?.isActive && promotion.kind === 'membership' && selected.has(promotion.key))
-    .map((promotion) => ({
-      promotion,
-      bonusCents: getMembershipBonusCents(amountCents, promotion, pricePerGarrafonCents),
-    }))
-    .filter((item) => item.bonusCents > 0)
-    .sort((a, b) => b.bonusCents - a.bonusCents)[0];
-
-  if (selectedMembership) {
-    return {
-      promotionKey: selectedMembership.promotion.key,
-      bonusCents: selectedMembership.bonusCents,
-      description: selectedMembership.promotion.title,
-      metadata: {
-        rule: 'membership',
-        garrafones: Number(selectedMembership.promotion.config?.garrafones || 0),
-        monthlyPriceCents: Number(selectedMembership.promotion.config?.monthlyPriceCents || 0),
-        pricePerGarrafonCents,
-        planValueCents: Number(selectedMembership.promotion.config?.garrafones || 0) * pricePerGarrafonCents,
-      },
-    };
-  }
 
   const topupPromotion = getPromotionByKey(promotions, PROMOTION_KEYS.TOPUP);
   const topupBonusCents = selected.has(PROMOTION_KEYS.TOPUP)
@@ -288,8 +264,6 @@ function getRechargeBonusOffer(amountCents, selectedPromotionKeys = [], promotio
 }
 
 function inferRechargeBonusOffer(amountCents, bonusCents, promotions = [], options = {}) {
-  const pricePerGarrafonCents = Number(options.pricePerGarrafonCents || PRICE_PER_GARRAFON_CENTS);
-  const amount = Number(amountCents || 0);
   const bonus = Number(bonusCents || 0);
   if (bonus <= 0) {
     return {
@@ -297,25 +271,6 @@ function inferRechargeBonusOffer(amountCents, bonusCents, promotions = [], optio
       bonusCents: 0,
       description: null,
       metadata: {},
-    };
-  }
-
-  const membership = (promotions || [])
-    .filter((promotion) => promotion?.isActive && promotion.kind === 'membership')
-    .find((promotion) => getMembershipBonusCents(amount, promotion, pricePerGarrafonCents) === bonus);
-
-  if (membership) {
-    return {
-      promotionKey: membership.key,
-      bonusCents: bonus,
-      description: membership.title,
-      metadata: {
-        rule: 'membership',
-        garrafones: Number(membership.config?.garrafones || 0),
-        monthlyPriceCents: Number(membership.config?.monthlyPriceCents || 0),
-        pricePerGarrafonCents,
-        planValueCents: Number(membership.config?.garrafones || 0) * pricePerGarrafonCents,
-      },
     };
   }
 

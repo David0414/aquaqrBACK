@@ -143,6 +143,92 @@ async function debitWalletBalanceTx(tx, userId, totalCents) {
   };
 }
 
+async function getAvailableMembershipCoverage(userId, liters, client = prisma) {
+  const memberships = await client.userMembership.findMany({
+    where: {
+      userId,
+      status: 'ACTIVE',
+      expiresAt: { gt: new Date() },
+      litersRemaining: { gt: 0 },
+    },
+    orderBy: { expiresAt: 'asc' },
+  });
+
+  let remainingLiters = Math.max(0, Number(liters || 0));
+  let coveredLiters = 0;
+
+  for (const membership of memberships) {
+    if (remainingLiters <= 0) break;
+    const availableLiters = Math.max(0, Number(membership.litersRemaining || 0));
+    const usedLiters = Math.min(remainingLiters, availableLiters);
+    coveredLiters += usedLiters;
+    remainingLiters -= usedLiters;
+  }
+
+  return {
+    coveredLiters,
+    remainingLiters,
+    hasCoverage: coveredLiters > 0,
+  };
+}
+
+async function consumeMembershipForDispenseTx(tx, userId, liters) {
+  const memberships = await tx.userMembership.findMany({
+    where: {
+      userId,
+      status: 'ACTIVE',
+      expiresAt: { gt: new Date() },
+      litersRemaining: { gt: 0 },
+    },
+    orderBy: { expiresAt: 'asc' },
+  });
+
+  let remainingLiters = Math.max(0, Number(liters || 0));
+  let coveredLiters = 0;
+  const consumedMembershipIds = [];
+
+  for (const membership of memberships) {
+    if (remainingLiters <= 0) break;
+
+    const availableLiters = Math.max(0, Number(membership.litersRemaining || 0));
+    const usedLiters = Math.min(remainingLiters, availableLiters);
+    const nextLitersRemaining = Math.max(0, availableLiters - usedLiters);
+
+    if (usedLiters <= 0) continue;
+
+    await tx.userMembership.update({
+      where: { id: membership.id },
+      data: {
+        litersRemaining: nextLitersRemaining,
+        garrafonesRemaining: Math.max(0, nextLitersRemaining / GARRAFON_LITERS),
+        status: nextLitersRemaining <= 0.001 ? 'USED' : 'ACTIVE',
+      },
+    });
+
+    consumedMembershipIds.push(membership.id);
+    coveredLiters += usedLiters;
+    remainingLiters -= usedLiters;
+  }
+
+  return {
+    coveredLiters,
+    remainingLiters,
+    consumedMembershipIds,
+  };
+}
+
+function payableCentsAfterMembership(totalCents, membershipCoverage, pricePerLiterCents) {
+  const coveredCents = Math.min(
+    Number(totalCents || 0),
+    Math.round(Number(membershipCoverage?.coveredLiters || 0) * Number(pricePerLiterCents || 0))
+  );
+
+  return {
+    coveredCents,
+    payableCents: Math.max(0, Number(totalCents || 0) - coveredCents),
+  };
+}
+
 function isMonitorAdminRequest(req) {
   const user = String(req.headers['x-monitor-user'] || '').trim();
   const password = String(req.headers['x-monitor-password'] || '').trim();
@@ -472,14 +558,20 @@ async function completeStartedDispense(existing, source = 'api') {
       return { alreadyCompleted: current?.status === 'COMPLETED' };
     }
 
-    const debitResult = await debitWalletBalanceTx(tx, existing.userId, existing.totalCents);
+    const membershipCoverage = await consumeMembershipForDispenseTx(tx, existing.userId, existing.liters);
+    const { payableCents, coveredCents } = payableCentsAfterMembership(
+      existing.totalCents,
+      membershipCoverage,
+      existing.pricePerLiterCents
+    );
+    const debitResult = await debitWalletBalanceTx(tx, existing.userId, payableCents);
     const updatedWallet = debitResult.updatedWallet;
 
     const ledger = await tx.ledgerEntry.create({
       data: {
         userId: existing.userId,
         type: 'DEBIT',
-        amountCents: existing.totalCents,
+        amountCents: payableCents,
         currency: existing.currency,
         description: `Dispensado de agua - ${existing.liters}L`,
         source: `DISPENSE:${existing.id}`,
@@ -495,6 +587,9 @@ async function completeStartedDispense(existing, source = 'api') {
       newBonusBalanceCents: Number(updatedWallet.bonusBalanceCents || 0),
       realDebitedCents: debitResult.realDebitedCents,
       bonusDebitedCents: debitResult.bonusDebitedCents,
+      membershipCoveredLiters: membershipCoverage.coveredLiters,
+      membershipCoveredCents: coveredCents,
+      chargedCents: payableCents,
       ledgerId: ledger.id,
     };
   });
@@ -504,7 +599,7 @@ async function completeStartedDispense(existing, source = 'api') {
   if (!result.alreadyCompleted) {
     sendUserNotification(existing.userId, {
       type: 'dispense',
-      amountCents: existing.totalCents,
+      amountCents: result.chargedCents ?? existing.totalCents,
       liters: existing.liters,
     }).catch((errNotif) => {
       console.error(`[Dispense] Error enviando notificacion (${source})`, errNotif);
@@ -1201,14 +1296,24 @@ router.post('/', requireAuth, async (req, res) => {
     }
 
     const walletSnapshot = walletBalanceSnapshot(wallet);
-    if (walletSnapshot.balanceCents < totalCents) {
+    const membershipCoverage = await getAvailableMembershipCoverage(userId, ltrs);
+    const { payableCents, coveredCents } = payableCentsAfterMembership(
+      totalCents,
+      membershipCoverage,
+      pricePerLiterCents
+    );
+
+    if (walletSnapshot.balanceCents < payableCents) {
       return res.status(400).json({
         error: 'INSUFFICIENT_FUNDS',
-        neededCents: totalCents - walletSnapshot.balanceCents,
+        neededCents: payableCents - walletSnapshot.balanceCents,
         balanceCents: walletSnapshot.balanceCents,
         realBalanceCents: walletSnapshot.realBalanceCents,
         bonusBalanceCents: walletSnapshot.bonusBalanceCents,
         totalCents,
+        payableCents,
+        membershipCoveredLiters: membershipCoverage.coveredLiters,
+        membershipCoveredCents: coveredCents,
       });
     }
 
@@ -1251,6 +1356,9 @@ router.post('/', requireAuth, async (req, res) => {
       pricePerGarrafonCents: pricing.pricePerGarrafonCents,
       amountCents: totalCents,
       totalCents,
+      payableCents,
+      membershipCoveredLiters: membershipCoverage.coveredLiters,
+      membershipCoveredCents: coveredCents,
       currency: CURRENCY,
       pulsesPerLiter: safePulsesPerLiter,
       prevBalanceCents: walletSnapshot.balanceCents,
@@ -1331,14 +1439,20 @@ router.post('/complete', requireAuth, async (req, res) => {
         return { alreadyCompleted: current?.status === 'COMPLETED' };
       }
 
-      const debitResult = await debitWalletBalanceTx(tx, userId, existing.totalCents);
+      const membershipCoverage = await consumeMembershipForDispenseTx(tx, userId, existing.liters);
+      const { payableCents, coveredCents } = payableCentsAfterMembership(
+        existing.totalCents,
+        membershipCoverage,
+        existing.pricePerLiterCents
+      );
+      const debitResult = await debitWalletBalanceTx(tx, userId, payableCents);
       const updatedWallet = debitResult.updatedWallet;
 
       const ledger = await tx.ledgerEntry.create({
         data: {
           userId,
           type: 'DEBIT',
-          amountCents: existing.totalCents,
+          amountCents: payableCents,
           currency: existing.currency,
           description: `Dispensado de agua • ${existing.liters}L`,
           source: `DISPENSE:${existing.id}`,
@@ -1354,6 +1468,9 @@ router.post('/complete', requireAuth, async (req, res) => {
         newBonusBalanceCents: Number(updatedWallet.bonusBalanceCents || 0),
         realDebitedCents: debitResult.realDebitedCents,
         bonusDebitedCents: debitResult.bonusDebitedCents,
+        membershipCoveredLiters: membershipCoverage.coveredLiters,
+        membershipCoveredCents: coveredCents,
+        chargedCents: payableCents,
         ledgerId: ledger.id,
       };
     });
@@ -1365,7 +1482,7 @@ router.post('/complete', requireAuth, async (req, res) => {
     if (!result.alreadyCompleted) {
       sendUserNotification(userId, {
         type: 'dispense',
-        amountCents: existing.totalCents,
+        amountCents: result.chargedCents ?? existing.totalCents,
         liters: existing.liters,
       }).catch((errNotif) => {
         console.error('[Dispense] Error enviando notificacion', errNotif);
@@ -1383,6 +1500,9 @@ router.post('/complete', requireAuth, async (req, res) => {
       pricePerLiterCents: existing.pricePerLiterCents,
       amountCents: existing.totalCents,
       totalCents: existing.totalCents,
+      chargedCents: result.chargedCents ?? existing.totalCents,
+      membershipCoveredLiters: result.membershipCoveredLiters || 0,
+      membershipCoveredCents: result.membershipCoveredCents || 0,
       currency: existing.currency,
       newBalanceCents: result.newBalanceCents ?? totalAvailableBalanceCents(wallet),
       realBalanceCents: result.newRealBalanceCents ?? Number(wallet?.balanceCents || 0),

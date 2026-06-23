@@ -54,6 +54,7 @@ model User {
   machineLocks MachineLock[]
   rewardCredits RewardCredit[]
   promotionSelections UserPromotionSelection[]
+  memberships UserMembership[]
 
   notificationSettings NotificationSettings?
 }
@@ -220,6 +221,28 @@ model RewardCredit {
 
   @@index([userId, createdAt])
   @@index([promotionKey, createdAt])
+}
+
+model UserMembership {
+  id                    String   @id @default(cuid())
+  userId                String
+  promotionKey          String
+  garrafonesTotal       Float
+  garrafonesRemaining   Float
+  litersTotal           Float
+  litersRemaining       Float
+  pricePaidCents        Int
+  pricePerGarrafonCents Int
+  startsAt              DateTime @default(now())
+  expiresAt             DateTime
+  status                String   @default("ACTIVE")
+  metadata              Json?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  user                  User     @relation(fields: [userId], references: [id])
+
+  @@index([userId, expiresAt])
+  @@index([promotionKey, status])
 }
 
 model UserPromotionSelection {

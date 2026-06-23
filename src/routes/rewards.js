@@ -13,7 +13,7 @@ const {
   saveUserPromotionSelections,
   isMonthlySelectablePromotion,
   getPromotionByKey,
-  applyRewardCreditTx,
+  GARRAFON_LITERS,
   PROMOTION_SELECTION_DAYS,
 } = require('../utils/rewards');
 
@@ -104,23 +104,23 @@ router.get('/summary', requireAuth, async (req, res) => {
       settleMonthlyRewards(prisma, userId, new Date(), promotions),
     ]);
 
-    const activeMembershipSince = new Date(Date.now() - PROMOTION_SELECTION_DAYS * 24 * 60 * 60 * 1000);
     const membershipPromotionKeys = promotions
       .filter((promotion) => promotion.kind === 'membership')
       .map((promotion) => promotion.key);
 
-    const [wallet, preview, totals, rewardCredits, activeMembershipCredits, dispenseStats, transactionCounts, user, selectionState] = await Promise.all([
+    const [wallet, preview, totals, rewardCredits, activeMemberships, dispenseStats, transactionCounts, user, selectionState] = await Promise.all([
       prisma.wallet.findUnique({ where: { userId } }),
       getCurrentMonthRewardPreview(prisma, userId, new Date(), promotions),
       getUserRewardTotals(prisma, userId),
       getRewardCredits(prisma, userId, 10),
-      prisma.rewardCredit.findMany({
+      prisma.userMembership.findMany({
         where: {
           userId,
           promotionKey: { in: membershipPromotionKeys },
-          createdAt: { gte: activeMembershipSince },
+          status: 'ACTIVE',
+          expiresAt: { gt: new Date() },
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: { expiresAt: 'asc' },
       }),
       prisma.dispense.aggregate({
         where: { userId, status: 'COMPLETED' },
@@ -152,7 +152,7 @@ router.get('/summary', requireAuth, async (req, res) => {
     const welcomeCredit = rewardCredits.find((item) => item.promotionKey === 'welcome_first_garrafon') || null;
     const welcomeAvailable = Boolean(welcomeCredit) && rechargeCount === 0 && dispenseCount === 0;
     const welcomeUsed = Boolean(welcomeCredit) && !welcomeAvailable;
-    const activeMembershipByKey = new Map(activeMembershipCredits.map((item) => [item.promotionKey, item]));
+    const activeMembershipByKey = new Map(activeMemberships.map((item) => [item.promotionKey, item]));
     const isPromotionEnabledForUser = (promotion) => {
       if (!isMonthlySelectablePromotion(promotion)) return Boolean(promotion.isActive);
       if (promotion.kind === 'membership') {
@@ -205,8 +205,10 @@ router.get('/summary', requireAuth, async (req, res) => {
             ? {
                 purchased: activeMembershipByKey.has(promotion.key),
                 label: activeMembershipByKey.has(promotion.key) ? 'Pagada' : 'Pagar para activar',
-                creditAmountCents: Number(activeMembershipByKey.get(promotion.key)?.amountCents || 0),
-                activeUntil: selectionState.expiresAt,
+                creditAmountCents: 0,
+                garrafonesRemaining: Number(activeMembershipByKey.get(promotion.key)?.garrafonesRemaining || 0),
+                litersRemaining: Number(activeMembershipByKey.get(promotion.key)?.litersRemaining || 0),
+                activeUntil: activeMembershipByKey.get(promotion.key)?.expiresAt || selectionState.expiresAt,
               }
             : null,
       })),
@@ -309,21 +311,21 @@ router.post('/membership/purchase', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Primero elige esta membresia en tus promociones' });
     }
 
-    const activeSince = new Date(Date.now() - PROMOTION_SELECTION_DAYS * 24 * 60 * 60 * 1000);
-    const existingMembershipCredit = await prisma.rewardCredit.findFirst({
+    const existingMembership = await prisma.userMembership.findFirst({
       where: {
         userId,
         promotionKey,
-        createdAt: { gte: activeSince },
+        status: 'ACTIVE',
+        expiresAt: { gt: new Date() },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { expiresAt: 'desc' },
     });
 
-    if (existingMembershipCredit) {
+    if (existingMembership) {
       return res.status(409).json({
         error: 'MEMBERSHIP_ALREADY_ACTIVE',
         message: 'Esta membresia ya esta activa por 30 dias.',
-        activeUntil: selectionState.expiresAt,
+        activeUntil: existingMembership.expiresAt,
       });
     }
 
@@ -331,10 +333,14 @@ router.post('/membership/purchase', requireAuth, async (req, res) => {
     const garrafones = Number(promotion.config?.garrafones || 0);
     const pricePerGarrafonCents = await getMachinePricePerGarrafonCents(req.body?.machineId, req.body?.hardwareId);
     const planValueCents = Math.round(garrafones * pricePerGarrafonCents);
+    const litersTotal = garrafones * GARRAFON_LITERS;
 
     if (!monthlyPriceCents || !garrafones || planValueCents <= 0) {
       return res.status(400).json({ error: 'Configuracion de membresia invalida' });
     }
+
+    const startsAt = new Date();
+    const expiresAt = new Date(startsAt.getTime() + PROMOTION_SELECTION_DAYS * 24 * 60 * 60 * 1000);
 
     const result = await prisma.$transaction(async (tx) => {
       await debitWalletBalanceTx(tx, userId, monthlyPriceCents);
@@ -352,26 +358,32 @@ router.post('/membership/purchase', requireAuth, async (req, res) => {
         },
       });
 
-      const reward = await applyRewardCreditTx(tx, {
-        userId,
-        promotionKey,
-        externalId: `reward:membership:${userId}:${promotionKey}:${Date.now()}`,
-        amountCents: planValueCents,
-        description: `${promotion.title}: ${garrafones} garrafones por 30 dias`,
-        metadata: {
-          rule: 'membership-wallet-purchase',
-          garrafones,
-          monthlyPriceCents,
+      const membership = await tx.userMembership.create({
+        data: {
+          userId,
+          promotionKey,
+          garrafonesTotal: garrafones,
+          garrafonesRemaining: garrafones,
+          litersTotal,
+          litersRemaining: litersTotal,
+          pricePaidCents: monthlyPriceCents,
           pricePerGarrafonCents,
-          planValueCents,
-          durationDays: PROMOTION_SELECTION_DAYS,
-          machineId: normalizeMachineId(req.body?.machineId) || null,
-          hardwareId: normalizeHardwareId(req.body?.hardwareId),
+          startsAt,
+          expiresAt,
+          status: 'ACTIVE',
+          metadata: {
+            rule: 'membership-wallet-purchase',
+            monthlyPriceCents,
+            planValueCents,
+            durationDays: PROMOTION_SELECTION_DAYS,
+            machineId: normalizeMachineId(req.body?.machineId) || null,
+            hardwareId: normalizeHardwareId(req.body?.hardwareId),
+          },
         },
       });
 
       const wallet = await tx.wallet.findUnique({ where: { userId } });
-      return { reward, wallet };
+      return { membership, wallet };
     });
 
     return res.json({
@@ -379,8 +391,15 @@ router.post('/membership/purchase', requireAuth, async (req, res) => {
       promotionKey,
       amountCents: monthlyPriceCents,
       planValueCents,
-      creditedCents: planValueCents,
-      activeUntil: selectionState.expiresAt,
+      creditedCents: 0,
+      membership: {
+        id: result.membership.id,
+        promotionKey,
+        garrafonesRemaining: result.membership.garrafonesRemaining,
+        litersRemaining: result.membership.litersRemaining,
+        activeUntil: result.membership.expiresAt,
+      },
+      activeUntil: result.membership.expiresAt,
       wallet: {
         balanceCents: totalAvailableBalanceCents(result.wallet),
         realBalanceCents: Number(result.wallet?.balanceCents || 0),
