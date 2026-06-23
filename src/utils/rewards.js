@@ -387,8 +387,9 @@ async function saveUserPromotionSelections(client, userId, promotionKeys, now = 
     throw new Error('Solo puedes elegir una membresia a la vez');
   }
 
+  const expiresAt = addDays(now, PROMOTION_SELECTION_DAYS);
+
   try {
-    const expiresAt = addDays(now, PROMOTION_SELECTION_DAYS);
     await client.$transaction(async (tx) => {
       await tx.userPromotionSelection.deleteMany({
         where: {
