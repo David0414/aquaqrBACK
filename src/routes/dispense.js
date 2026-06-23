@@ -81,9 +81,9 @@ async function ensureUserAndWallet(userId) {
   });
 }
 
-function totalForLiters(ltrs) {
+function totalForLiters(ltrs, pricePerLiterCents = PRICE_PER_LITER_CENTS) {
   // total en centavos, entero
-  return Math.round(ltrs * PRICE_PER_LITER_CENTS);
+  return Math.round(ltrs * pricePerLiterCents);
 }
 
 function totalAvailableBalanceCents(wallet) {
@@ -96,6 +96,12 @@ function walletBalanceSnapshot(wallet) {
     realBalanceCents: Number(wallet?.balanceCents || 0),
     bonusBalanceCents: Number(wallet?.bonusBalanceCents || 0),
   };
+}
+
+function sanitizePricePerGarrafonCents(value, fallback = PRICE_PER_GARRAFON_CENTS) {
+  const next = Number(value);
+  if (!Number.isFinite(next) || next <= 0) return fallback;
+  return Math.round(next);
 }
 
 async function debitWalletBalanceTx(tx, userId, totalCents) {
@@ -177,6 +183,29 @@ function controlHardwareId(hardwareIdValue, machineIdValue) {
   return normalizeHardwareId(hardwareIdValue)
     || hardwareIdFromMachineId(machineIdValue)
     || (SINGLE_MACHINE_MODE ? DEFAULT_MACHINE_HARDWARE_ID : null);
+}
+
+async function getMachinePricing(machineIdValue, hardwareIdValue) {
+  const machineId = normalizeMachineId(machineIdValue);
+  const hardwareId = normalizeHardwareId(hardwareIdValue);
+  let machine = null;
+
+  if (machineId) {
+    machine = await prisma.machine.findUnique({ where: { id: machineId } }).catch(() => null);
+  }
+
+  if (!machine && hardwareId) {
+    machine = await prisma.machine.findFirst({ where: { hardwareId } }).catch(() => null);
+  }
+
+  const pricePerGarrafonCents = sanitizePricePerGarrafonCents(machine?.pricePerGarrafonCents);
+  const pricePerLiterCents = Math.round(pricePerGarrafonCents / GARRAFON_LITERS);
+
+  return {
+    machine,
+    pricePerGarrafonCents,
+    pricePerLiterCents,
+  };
 }
 
 function machineLockExpiresAt() {
@@ -1153,10 +1182,11 @@ router.post('/', requireAuth, async (req, res) => {
       });
     }
 
-    const pricePerLiterCents = PRICE_PER_LITER_CENTS;
-    const totalCents = totalForLiters(ltrs);
     const safeMachineId = normalizeMachineId(machineId);
     const commandHardwareId = controlHardwareId(hardwareId, safeMachineId);
+    const pricing = await getMachinePricing(safeMachineId, commandHardwareId);
+    const pricePerLiterCents = pricing.pricePerLiterCents;
+    const totalCents = totalForLiters(ltrs, pricePerLiterCents);
 
     await ensureUserAndWallet(userId);
     await requireMachineLockOwner(safeMachineId, userId, {
@@ -1218,6 +1248,7 @@ router.post('/', requireAuth, async (req, res) => {
       txId: dispense.id,
       liters: ltrs,
       pricePerLiterCents,
+      pricePerGarrafonCents: pricing.pricePerGarrafonCents,
       amountCents: totalCents,
       totalCents,
       currency: CURRENCY,
@@ -1425,21 +1456,28 @@ router.get('/history', requireAuth, async (req, res) => {
 /* ----------------------------------------------------------------------------- */
 /* GET /api/dispense/config (pública)                                            */
 /* ----------------------------------------------------------------------------- */
-router.get('/config', (req, res) => {
-  const optionsLiters = Array.from(ALLOWED_LITERS);
-  const hardwareId = controlHardwareId(req.query?.hardwareId, req.query?.machineId);
-  const pulsesPerLiter = getPulsesPerLiterForHardware(hardwareId);
-  res.json({
-    currency: CURRENCY,
-    garrafonLiters: GARRAFON_LITERS,
-    pricePerGarrafonCents: PRICE_PER_GARRAFON_CENTS,
-    pricePerLiterCents: PRICE_PER_LITER_CENTS,
-    defaultPulsesPerLiter: DEFAULT_PULSES_PER_LITER,
-    pulsesPerLiter,
-    hardwareId,
-    optionsLiters,
-    allowedLiters: optionsLiters,
-  });
+router.get('/config', async (req, res) => {
+  try {
+    const optionsLiters = Array.from(ALLOWED_LITERS);
+    const hardwareId = controlHardwareId(req.query?.hardwareId, req.query?.machineId);
+    const pricing = await getMachinePricing(req.query?.machineId, hardwareId);
+    const pulsesPerLiter = getPulsesPerLiterForHardware(hardwareId);
+    res.json({
+      currency: CURRENCY,
+      garrafonLiters: GARRAFON_LITERS,
+      pricePerGarrafonCents: pricing.pricePerGarrafonCents,
+      pricePerLiterCents: pricing.pricePerLiterCents,
+      defaultPulsesPerLiter: DEFAULT_PULSES_PER_LITER,
+      pulsesPerLiter,
+      hardwareId,
+      machineId: pricing.machine?.id || normalizeMachineId(req.query?.machineId) || null,
+      optionsLiters,
+      allowedLiters: optionsLiters,
+    });
+  } catch (e) {
+    console.error('GET /api/dispense/config error', e);
+    res.status(500).json({ error: 'No se pudo cargar la configuracion' });
+  }
 });
 
 router.post('/config/pulses', requireAuthOrMonitorAdmin, (req, res) => {
@@ -1490,7 +1528,13 @@ router.get('/active', requireAuth, async (req, res) => {
       return res.json({ ok: true, active: false });
     }
 
-    const pricePerLiter = PRICE_PER_LITER_CENTS / 100;
+    const pricing = dispense
+      ? {
+          pricePerLiterCents: dispense.pricePerLiterCents,
+          pricePerGarrafonCents: Math.round((dispense.pricePerLiterCents || PRICE_PER_LITER_CENTS) * GARRAFON_LITERS),
+        }
+      : await getMachinePricing(lock.machineId, lock.hardwareId);
+    const pricePerLiter = pricing.pricePerLiterCents / 100;
     const selectedLiters = dispense?.liters ?? lock.selectedLiters ?? LITERS_FULL;
     const tx = dispense
       ? {
@@ -1520,6 +1564,8 @@ router.get('/active', requireAuth, async (req, res) => {
       stageCode,
       waterserver,
       reconnecting: waterserver.reconnecting,
+      pricePerGarrafonCents: pricing.pricePerGarrafonCents,
+      pricePerLiterCents: pricing.pricePerLiterCents,
       tx,
       nextPath: activePathForStage(stageCode, Boolean(tx)),
       expiresAt: lock.expiresAt,
@@ -1613,7 +1659,7 @@ router.post('/active/cancel', requireAuth, async (req, res) => {
 /* ----------------------------------------------------------------------------- */
 /* GET /api/dispense/quote?liters=10  (pública)                                  */
 /* ----------------------------------------------------------------------------- */
-router.get('/quote', (req, res) => {
+router.get('/quote', async (req, res) => {
   const ltrs = Number(req.query.liters || 0);
   if (!ALLOWED_LITERS.has(ltrs)) {
     return res.status(400).json({
@@ -1621,12 +1667,16 @@ router.get('/quote', (req, res) => {
       allowed: Array.from(ALLOWED_LITERS),
     });
   }
-  const totalCents = totalForLiters(ltrs);
+  const hardwareId = controlHardwareId(req.query?.hardwareId, req.query?.machineId);
+  const pricing = await getMachinePricing(req.query?.machineId, hardwareId);
+  const totalCents = totalForLiters(ltrs, pricing.pricePerLiterCents);
   res.json({
     liters: ltrs,
     totalCents,
     currency: CURRENCY,
-    pricePerLiterCents: PRICE_PER_LITER_CENTS,
+    pricePerLiterCents: pricing.pricePerLiterCents,
+    pricePerGarrafonCents: pricing.pricePerGarrafonCents,
+    machineId: pricing.machine?.id || normalizeMachineId(req.query?.machineId) || null,
   });
 });
 

@@ -11,11 +11,10 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
 const { requireAuth } = require('../utils/auth');
 const {
   getPromotionCatalog,
-  getPromotionByKey,
-  getTopUpBonusCents,
-  PROMOTION_KEYS,
   applyRewardCreditTx,
   getUserPromotionSelectionState,
+  getRechargeBonusOffer,
+  inferRechargeBonusOffer,
 } = require('../utils/rewards');
 
 /* -----------------------------------------------------------------------------
@@ -44,6 +43,34 @@ function normalizeMachineId(value) {
     .replace(/[^0-9A-Z_-]/g, '') || 'UNKNOWN';
 }
 
+function normalizeHardwareId(value) {
+  const clean = String(value || '').trim().toUpperCase().replace(/[^0-9A-F]/g, '');
+  return clean ? clean.padStart(2, '0').slice(-2) : null;
+}
+
+function sanitizePricePerGarrafonCents(value) {
+  const fallback = Number.parseInt(process.env.PRICE_PER_GARRAFON_CENTS || '3500', 10) || 3500;
+  const next = Number(value);
+  if (!Number.isFinite(next) || next <= 0) return fallback;
+  return Math.round(next);
+}
+
+async function getMachinePricePerGarrafonCents(machineIdValue, hardwareIdValue) {
+  const machineId = String(machineIdValue || '').trim() ? normalizeMachineId(machineIdValue) : '';
+  const hardwareId = normalizeHardwareId(hardwareIdValue);
+  let machine = null;
+
+  if (machineId && machineId !== 'UNKNOWN') {
+    machine = await prisma.machine.findUnique({ where: { id: machineId } }).catch(() => null);
+  }
+
+  if (!machine && hardwareId) {
+    machine = await prisma.machine.findFirst({ where: { hardwareId } }).catch(() => null);
+  }
+
+  return sanitizePricePerGarrafonCents(machine?.pricePerGarrafonCents);
+}
+
 function walletBalanceResponse(wallet) {
   const realBalanceCents = Number(wallet?.balanceCents || 0);
   const bonusBalanceCents = Number(wallet?.bonusBalanceCents || 0);
@@ -52,6 +79,29 @@ function walletBalanceResponse(wallet) {
     realBalanceCents,
     bonusBalanceCents,
   };
+}
+
+function currentMonthBoundsUtc(now = new Date()) {
+  const from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
+  const to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0, 0));
+  return { from, to };
+}
+
+async function hasMembershipRewardThisMonth(userId, promotionKey, now = new Date()) {
+  if (!promotionKey) return false;
+  const { from, to } = currentMonthBoundsUtc(now);
+  const existing = await prisma.rewardCredit.findFirst({
+    where: {
+      userId,
+      promotionKey,
+      createdAt: {
+        gte: from,
+        lt: to,
+      },
+    },
+    select: { id: true },
+  });
+  return Boolean(existing);
 }
 
 /** Mapea estatus de Prisma -> etiqueta de UI */
@@ -103,13 +153,28 @@ async function settleRechargeSuccessTx(tx, recharge, actualAmountCents, currency
   });
 
   if ((recharge.bonusCents || 0) > 0) {
+    const promotions = await getPromotionCatalog(tx);
+    const bonusOffer = recharge.bonusPromotionKey
+      ? {
+          promotionKey: recharge.bonusPromotionKey,
+          bonusCents: recharge.bonusCents,
+          description: promotions.find((promotion) => promotion.key === recharge.bonusPromotionKey)?.title || null,
+          metadata: recharge.bonusMetadata || {},
+        }
+      : inferRechargeBonusOffer(actualAmountCents, recharge.bonusCents, promotions);
+    const promotionKey = bonusOffer.promotionKey || 'topup_bonus';
+    const bonusDescription = bonusOffer.metadata?.rule === 'membership'
+      ? `${bonusOffer.description}: saldo extra del plan`
+      : `Bonificacion por recarga de $${(actualAmountCents / 100).toFixed(2)}`;
+
     await applyRewardCreditTx(tx, {
       userId: recharge.userId,
-      promotionKey: PROMOTION_KEYS.TOPUP,
-      externalId: `reward:topup:${recharge.providerPaymentId}`,
+      promotionKey,
+      externalId: `reward:${promotionKey}:${recharge.providerPaymentId}`,
       amountCents: recharge.bonusCents,
-      description: `Bonificacion por recarga de $${(actualAmountCents / 100).toFixed(2)}`,
+      description: bonusDescription,
       metadata: {
+        ...bonusOffer.metadata,
         rechargeId: recharge.id,
         providerPaymentId: recharge.providerPaymentId,
         amountCents: actualAmountCents,
@@ -125,7 +190,7 @@ async function settleRechargeSuccessTx(tx, recharge, actualAmountCents, currency
  * ---------------------------------------------------------------------------*/
 router.post('/create-intent', requireAuth, async (req, res) => {
   try {
-    const { amountCents } = req.body;
+    const { amountCents, machineId, hardwareId } = req.body;
 
     // Validaciones
     if (!Number.isInteger(amountCents) || amountCents <= 0) {
@@ -148,9 +213,23 @@ router.post('/create-intent', requireAuth, async (req, res) => {
     await ensureUserAndWallet({ userId, email, name });
     const promotions = await getPromotionCatalog(prisma);
     const selectionState = await getUserPromotionSelectionState(prisma, userId, new Date(), promotions);
-    const topupPromotion = getPromotionByKey(promotions, PROMOTION_KEYS.TOPUP);
-    const topupEnabledForUser = selectionState.selectedPromotionKeys.includes(PROMOTION_KEYS.TOPUP);
-    const bonusCents = topupEnabledForUser ? getTopUpBonusCents(amountCents, topupPromotion) : 0;
+    const pricePerGarrafonCents = await getMachinePricePerGarrafonCents(machineId, hardwareId);
+    const bonusOffer = getRechargeBonusOffer(amountCents, selectionState.selectedPromotionKeys, promotions, {
+      pricePerGarrafonCents,
+    });
+
+    if (bonusOffer.metadata?.rule === 'membership') {
+      const alreadyUsed = await hasMembershipRewardThisMonth(userId, bonusOffer.promotionKey);
+      if (alreadyUsed) {
+        return res.status(400).json({
+          error: 'MEMBERSHIP_ALREADY_USED',
+          message: 'Esta membresia ya fue aplicada este mes. Puedes elegir otra promocion o usar tu saldo normal.',
+          promotionKey: bonusOffer.promotionKey,
+        });
+      }
+    }
+
+    const bonusCents = bonusOffer.bonusCents;
 
     // 1) Creamos la recarga en estado PENDING
     const recharge = await prisma.recharge.create({
@@ -159,6 +238,13 @@ router.post('/create-intent', requireAuth, async (req, res) => {
         provider: 'STRIPE',
         amountCents,
         bonusCents,
+        bonusPromotionKey: bonusOffer.promotionKey,
+        bonusMetadata: {
+          ...bonusOffer.metadata,
+          machineId: machineId ? normalizeMachineId(machineId) : undefined,
+          hardwareId: normalizeHardwareId(hardwareId),
+          pricePerGarrafonCents,
+        },
         currency: dbCurrency,
         status: 'PENDING',
       },
@@ -188,6 +274,8 @@ router.post('/create-intent', requireAuth, async (req, res) => {
       rechargeId: recharge.id,
       bonusCents,
       totalReceiveCents: amountCents + bonusCents,
+      bonusPromotionKey: bonusOffer.promotionKey,
+      bonusDescription: bonusOffer.description,
     });
   } catch (err) {
     console.error('POST /api/recharge/create-intent error', err);

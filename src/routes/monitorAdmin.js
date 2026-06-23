@@ -13,6 +13,7 @@ const FRONT_URL = (process.env.APP_PUBLIC_URL || 'http://localhost:5173').replac
 const QR_BASE_URL = (process.env.QR_BASE_URL || FRONT_URL).replace(/\/+$/, '');
 const SECRET = process.env.QR_SIGNING_SECRET;
 const STICKERS_DIR = path.join(__dirname, '..', '..', 'stickers');
+const DEFAULT_PRICE_PER_GARRAFON_CENTS = Number.parseInt(process.env.PRICE_PER_GARRAFON_CENTS || '3500', 10) || 3500;
 const STICKER_MACHINE_DEFAULTS = Object.freeze({
   'AQ-001': {
     name: 'Dispensador AQ-001',
@@ -35,6 +36,12 @@ function normalizeHardwareId(value) {
   return clean ? clean.padStart(2, '0').slice(-2) : null;
 }
 
+function moneyCentsFromInput(value, fallback = DEFAULT_PRICE_PER_GARRAFON_CENTS) {
+  const raw = Number(value);
+  if (!Number.isFinite(raw) || raw <= 0) return fallback;
+  return raw > 1000 ? Math.round(raw) : Math.round(raw * 100);
+}
+
 function listStickerMachines() {
   try {
     if (!fs.existsSync(STICKERS_DIR)) return [];
@@ -50,6 +57,7 @@ function listStickerMachines() {
           location: defaults.location || null,
           address: defaults.address || defaults.location || null,
           hardwareId: normalizeHardwareId(defaults.hardwareId),
+          pricePerGarrafonCents: DEFAULT_PRICE_PER_GARRAFON_CENTS,
           status: defaults.status || 'ONLINE',
           isActive: true,
           stickerUrl: `/stickers/${fileName}`,
@@ -89,6 +97,7 @@ function mergeMachines(dbMachines) {
       location: current.location || stickerMachine.location,
       address: current.address || stickerMachine.address,
       hardwareId: current.hardwareId || stickerMachine.hardwareId,
+      pricePerGarrafonCents: current.pricePerGarrafonCents || stickerMachine.pricePerGarrafonCents || DEFAULT_PRICE_PER_GARRAFON_CENTS,
       status: current.status || stickerMachine.status,
       stickerUrl: current.stickerUrl || stickerMachine.stickerUrl,
       discoveredFrom: current.discoveredFrom || 'database',
@@ -128,6 +137,7 @@ router.post('/machines', requireAuthOrMonitorAdmin, async (req, res) => {
         location: String(req.body?.location || '').trim() || null,
         address: String(req.body?.address || '').trim() || null,
         hardwareId: normalizeHardwareId(req.body?.hardwareId),
+        pricePerGarrafonCents: moneyCentsFromInput(req.body?.pricePerGarrafonCents ?? req.body?.pricePerGarrafon),
         status: String(req.body?.status || 'ONLINE').trim().toUpperCase() || 'ONLINE',
         isActive: req.body?.isActive !== false,
       },
@@ -137,6 +147,7 @@ router.post('/machines', requireAuthOrMonitorAdmin, async (req, res) => {
         location: String(req.body?.location || '').trim() || null,
         address: String(req.body?.address || '').trim() || null,
         hardwareId: normalizeHardwareId(req.body?.hardwareId),
+        pricePerGarrafonCents: moneyCentsFromInput(req.body?.pricePerGarrafonCents ?? req.body?.pricePerGarrafon),
         status: String(req.body?.status || 'ONLINE').trim().toUpperCase() || 'ONLINE',
         isActive: req.body?.isActive !== false,
       },
@@ -163,6 +174,7 @@ router.put('/machines/:id', requireAuthOrMonitorAdmin, async (req, res) => {
         location: String(req.body?.location || '').trim() || null,
         address: String(req.body?.address || '').trim() || null,
         hardwareId: normalizeHardwareId(req.body?.hardwareId),
+        pricePerGarrafonCents: moneyCentsFromInput(req.body?.pricePerGarrafonCents ?? req.body?.pricePerGarrafon),
         status: String(req.body?.status || 'ONLINE').trim().toUpperCase() || 'ONLINE',
         isActive: req.body?.isActive !== false,
       },

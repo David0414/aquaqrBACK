@@ -73,6 +73,8 @@ model Recharge {
   provider          Provider
   amountCents       Int
   bonusCents        Int            @default(0)
+  bonusPromotionKey String?
+  bonusMetadata     Json?
   currency          String
   status            RechargeStatus @default(PENDING)
   providerPaymentId String?        @unique
@@ -173,15 +175,16 @@ model MachineLock {
 }
 
 model Machine {
-  id        String   @id
-  name      String?
-  location  String?
-  address   String?
-  hardwareId String?
-  status    String   @default("ONLINE")
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                    String   @id
+  name                  String?
+  location              String?
+  address               String?
+  hardwareId            String?
+  pricePerGarrafonCents Int      @default(3500)
+  status                String   @default("ONLINE")
+  isActive              Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
 
   @@index([isActive])
   @@index([hardwareId])

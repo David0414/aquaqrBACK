@@ -1,0 +1,2 @@
+ALTER TABLE "Machine"
+ADD COLUMN "pricePerGarrafonCents" INTEGER NOT NULL DEFAULT 3500;

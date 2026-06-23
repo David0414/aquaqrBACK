@@ -3,7 +3,7 @@ const express = require('express');
 const router = express.Router();
 const Stripe = require('stripe');
 const { prisma } = require('../db'); // 👈 usa el singleton
-const { applyRewardCreditTx, PROMOTION_KEYS } = require('../utils/rewards');
+const { applyRewardCreditTx, getPromotionCatalog, inferRechargeBonusOffer } = require('../utils/rewards');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: '2024-06-20' });
 
@@ -54,13 +54,28 @@ async function creditIfPending({ userId, rechargeId, providerPaymentId, amountCe
     });
 
     if ((recharge.bonusCents || 0) > 0) {
+      const promotions = await getPromotionCatalog(tx);
+      const bonusOffer = recharge.bonusPromotionKey
+        ? {
+            promotionKey: recharge.bonusPromotionKey,
+            bonusCents: recharge.bonusCents,
+            description: promotions.find((promotion) => promotion.key === recharge.bonusPromotionKey)?.title || null,
+            metadata: recharge.bonusMetadata || {},
+          }
+        : inferRechargeBonusOffer(amountCents, recharge.bonusCents, promotions);
+      const promotionKey = bonusOffer.promotionKey || 'topup_bonus';
+      const bonusDescription = bonusOffer.metadata?.rule === 'membership'
+        ? `${bonusOffer.description}: saldo extra del plan`
+        : `Bonificacion por recarga de $${(amountCents / 100).toFixed(2)}`;
+
       await applyRewardCreditTx(tx, {
         userId,
-        promotionKey: PROMOTION_KEYS.TOPUP,
-        externalId: `reward:topup:${providerPaymentId}`,
+        promotionKey,
+        externalId: `reward:${promotionKey}:${providerPaymentId}`,
         amountCents: recharge.bonusCents,
-        description: `Bonificacion por recarga de $${(amountCents / 100).toFixed(2)}`,
+        description: bonusDescription,
         metadata: {
+          ...bonusOffer.metadata,
           rechargeId,
           providerPaymentId,
           amountCents,
