@@ -4,6 +4,7 @@ const CURRENCY = (process.env.CURRENCY || 'mxn').toUpperCase();
 const GARRAFON_LITERS = Number.parseInt(process.env.GARRAFON_LITERS || '20', 10) || 20;
 const PRICE_PER_GARRAFON_CENTS = Number.parseInt(process.env.PRICE_PER_GARRAFON_CENTS || '3500', 10) || 3500;
 const DEFAULT_POINTS_PER_LITER = 10 / GARRAFON_LITERS;
+const PROMOTION_SELECTION_DAYS = Number.parseInt(process.env.PROMOTION_SELECTION_DAYS || '30', 10) || 30;
 
 const PROMOTION_KEYS = Object.freeze({
   WELCOME: 'welcome_first_garrafon',
@@ -142,6 +143,10 @@ function monthKey(date) {
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, '0');
   return `${year}-${month}`;
+}
+
+function addDays(date, days) {
+  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
 }
 
 async function ensurePromotionCatalog(client = prisma) {
@@ -324,13 +329,24 @@ function inferRechargeBonusOffer(amountCents, bonusCents, promotions = [], optio
   };
 }
 
-async function getUserPromotionSelections(client, userId, selectionMonthKey) {
+async function getUserPromotionSelections(client, userId, selectionMonthKey, options = {}) {
+  const now = options.now || null;
+  const activeOnly = Boolean(options.activeOnly);
+  const where = {
+    userId,
+    ...(selectionMonthKey ? { monthKey: selectionMonthKey } : {}),
+  };
+
+  if (activeOnly && now) {
+    where.OR = [
+      { expiresAt: null },
+      { expiresAt: { gt: now } },
+    ];
+  }
+
   try {
     return await client.userPromotionSelection.findMany({
-      where: {
-        userId,
-        monthKey: selectionMonthKey,
-      },
+      where,
       orderBy: { createdAt: 'asc' },
     });
   } catch (error) {
@@ -341,8 +357,8 @@ async function getUserPromotionSelections(client, userId, selectionMonthKey) {
   }
 }
 
-async function getUserSelectedPromotionKeys(client, userId, selectionMonthKey) {
-  const rows = await getUserPromotionSelections(client, userId, selectionMonthKey);
+async function getUserSelectedPromotionKeys(client, userId, selectionMonthKey, options = {}) {
+  const rows = await getUserPromotionSelections(client, userId, selectionMonthKey, options);
   return rows.map((row) => row.promotionKey);
 }
 
@@ -353,6 +369,8 @@ async function saveUserPromotionSelections(client, userId, promotionKeys, now = 
   const selectableKeys = new Set(selectablePromotions.map((promotion) => promotion.key));
   const maxCount = Math.min(2, selectablePromotions.length);
   const uniqueKeys = [...new Set((promotionKeys || []).filter(Boolean))];
+  const selectedPromotions = uniqueKeys.map((key) => getPromotionByKey(resolvedPromotions, key)).filter(Boolean);
+  const selectedMemberships = selectedPromotions.filter((promotion) => promotion.kind === 'membership');
 
   if (uniqueKeys.length < 1 || uniqueKeys.length > maxCount) {
     throw new Error(maxCount > 0
@@ -365,12 +383,21 @@ async function saveUserPromotionSelections(client, userId, promotionKeys, now = 
     throw new Error('Una de las promociones elegidas no esta disponible este mes');
   }
 
+  if (selectedMemberships.length > 1) {
+    throw new Error('Solo puedes elegir una membresia a la vez');
+  }
+
   try {
+    const expiresAt = addDays(now, PROMOTION_SELECTION_DAYS);
     await client.$transaction(async (tx) => {
       await tx.userPromotionSelection.deleteMany({
         where: {
           userId,
-          monthKey: selectionMonthKey,
+          OR: [
+            { monthKey: selectionMonthKey },
+            { expiresAt: null },
+            { expiresAt: { gt: now } },
+          ],
         },
       });
 
@@ -380,6 +407,7 @@ async function saveUserPromotionSelections(client, userId, promotionKeys, now = 
             userId,
             monthKey: selectionMonthKey,
             promotionKey,
+            expiresAt,
           })),
         });
       }
@@ -395,6 +423,8 @@ async function saveUserPromotionSelections(client, userId, promotionKeys, now = 
     month: selectionMonthKey,
     promotionKeys: uniqueKeys,
     requiredCount: maxCount,
+    expiresAt,
+    durationDays: PROMOTION_SELECTION_DAYS,
   };
 }
 
@@ -404,8 +434,14 @@ async function getUserPromotionSelectionState(client, userId, now = new Date(), 
   const selectablePromotions = getMonthlySelectablePromotions(resolvedPromotions);
   const requiredCount = Math.min(2, selectablePromotions.length);
   const selectableKeys = new Set(selectablePromotions.map((promotion) => promotion.key));
-  const selectedPromotionKeys = (await getUserSelectedPromotionKeys(client, userId, selectionMonthKey))
+  const selections = await getUserPromotionSelections(client, userId, selectionMonthKey, { now, activeOnly: true });
+  const selectedPromotionKeys = selections
+    .map((row) => row.promotionKey)
     .filter((key) => selectableKeys.has(key));
+  const expiresAt = selections
+    .map((row) => row.expiresAt)
+    .filter(Boolean)
+    .sort((a, b) => new Date(a) - new Date(b))[0] || null;
 
   return {
     month: selectionMonthKey,
@@ -413,6 +449,8 @@ async function getUserPromotionSelectionState(client, userId, now = new Date(), 
     selectedPromotionKeys,
     complete: requiredCount === 0 ? true : selectedPromotionKeys.length > 0 && selectedPromotionKeys.length <= requiredCount,
     selectablePromotions,
+    expiresAt,
+    durationDays: PROMOTION_SELECTION_DAYS,
   };
 }
 
@@ -683,6 +721,7 @@ module.exports = {
   GARRAFON_LITERS,
   PRICE_PER_GARRAFON_CENTS,
   DEFAULT_POINTS_PER_LITER,
+  PROMOTION_SELECTION_DAYS,
   PROMOTION_KEYS,
   DEFAULT_PROMOTIONS,
   MONTHLY_SELECTABLE_PROMOTION_KEYS,

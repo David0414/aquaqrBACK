@@ -228,9 +228,11 @@ model UserPromotionSelection {
   monthKey     String
   promotionKey String
   createdAt    DateTime @default(now())
+  expiresAt    DateTime?
   user         User     @relation(fields: [userId], references: [id])
 
   @@unique([userId, monthKey, promotionKey])
   @@index([userId, monthKey])
   @@index([promotionKey, monthKey])
+  @@index([userId, expiresAt])
 }
