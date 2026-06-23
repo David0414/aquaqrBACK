@@ -231,10 +231,22 @@ function payableCentsAfterMembership(totalCents, membershipCoverage, pricePerLit
 
 async function chargeDispenseIfMissingTx(tx, existing) {
   const externalId = `DISPENSE:${existing.id}`;
-  const postedDebit = await tx.ledgerEntry.findUnique({ where: { externalId } });
+  const postedDebits = await tx.ledgerEntry.findMany({
+    where: {
+      userId: existing.userId,
+      type: 'DEBIT',
+      status: 'POSTED',
+      OR: [
+        { externalId },
+        { source: externalId },
+      ],
+    },
+  });
+  const chargedAlreadyCents = postedDebits.reduce((sum, item) => sum + Number(item.amountCents || 0), 0);
 
-  if (postedDebit?.type === 'DEBIT' && postedDebit.status === 'POSTED') {
+  if (chargedAlreadyCents >= Number(existing.totalCents || 0)) {
     const wallet = await tx.wallet.findUnique({ where: { userId: existing.userId } });
+    const ledger = postedDebits.find((item) => item.externalId === externalId) || postedDebits[0] || null;
     return {
       alreadyCharged: true,
       updatedWallet: wallet,
@@ -244,30 +256,27 @@ async function chargeDispenseIfMissingTx(tx, existing) {
       realDebitedCents: 0,
       bonusDebitedCents: 0,
       membershipCoveredLiters: 0,
-      membershipCoveredCents: Math.max(0, Number(existing.totalCents || 0) - Number(postedDebit.amountCents || 0)),
-      chargedCents: Number(postedDebit.amountCents || 0),
-      ledgerId: postedDebit.id,
+      membershipCoveredCents: 0,
+      chargedCents: chargedAlreadyCents,
+      ledgerId: ledger?.id,
     };
   }
 
-  const membershipCoverage = await consumeMembershipForDispenseTx(tx, existing.userId, existing.liters);
-  const { payableCents, coveredCents } = payableCentsAfterMembership(
-    existing.totalCents,
-    membershipCoverage,
-    existing.pricePerLiterCents
-  );
-  const debitResult = await debitWalletBalanceTx(tx, existing.userId, payableCents);
+  const amountToChargeCents = Math.max(0, Number(existing.totalCents || 0) - chargedAlreadyCents);
+  const debitResult = await debitWalletBalanceTx(tx, existing.userId, amountToChargeCents);
   const updatedWallet = debitResult.updatedWallet;
 
   const ledger = await tx.ledgerEntry.create({
     data: {
       userId: existing.userId,
       type: 'DEBIT',
-      amountCents: payableCents,
+      amountCents: amountToChargeCents,
       currency: existing.currency,
       description: `Dispensado de agua - ${existing.liters}L`,
       source: `DISPENSE:${existing.id}`,
-      externalId,
+      externalId: chargedAlreadyCents > 0
+        ? `DISPENSE_ADJUST:${existing.id}:${Date.now()}`
+        : externalId,
       status: 'POSTED',
     },
   });
@@ -280,9 +289,9 @@ async function chargeDispenseIfMissingTx(tx, existing) {
     newBonusBalanceCents: Number(updatedWallet.bonusBalanceCents || 0),
     realDebitedCents: debitResult.realDebitedCents,
     bonusDebitedCents: debitResult.bonusDebitedCents,
-    membershipCoveredLiters: membershipCoverage.coveredLiters,
-    membershipCoveredCents: coveredCents,
-    chargedCents: payableCents,
+    membershipCoveredLiters: 0,
+    membershipCoveredCents: 0,
+    chargedCents: chargedAlreadyCents + amountToChargeCents,
     ledgerId: ledger.id,
   };
 }
@@ -1325,24 +1334,18 @@ router.post('/', requireAuth, async (req, res) => {
     }
 
     const walletSnapshot = walletBalanceSnapshot(wallet);
-    const membershipCoverage = await getAvailableMembershipCoverage(userId, ltrs);
-    const { payableCents, coveredCents } = payableCentsAfterMembership(
-      totalCents,
-      membershipCoverage,
-      pricePerLiterCents
-    );
 
-    if (walletSnapshot.balanceCents < payableCents) {
+    if (walletSnapshot.balanceCents < totalCents) {
       return res.status(400).json({
         error: 'INSUFFICIENT_FUNDS',
-        neededCents: payableCents - walletSnapshot.balanceCents,
+        neededCents: totalCents - walletSnapshot.balanceCents,
         balanceCents: walletSnapshot.balanceCents,
         realBalanceCents: walletSnapshot.realBalanceCents,
         bonusBalanceCents: walletSnapshot.bonusBalanceCents,
         totalCents,
-        payableCents,
-        membershipCoveredLiters: membershipCoverage.coveredLiters,
-        membershipCoveredCents: coveredCents,
+        payableCents: totalCents,
+        membershipCoveredLiters: 0,
+        membershipCoveredCents: 0,
       });
     }
 
@@ -1385,9 +1388,9 @@ router.post('/', requireAuth, async (req, res) => {
       pricePerGarrafonCents: pricing.pricePerGarrafonCents,
       amountCents: totalCents,
       totalCents,
-      payableCents,
-      membershipCoveredLiters: membershipCoverage.coveredLiters,
-      membershipCoveredCents: coveredCents,
+      payableCents: totalCents,
+      membershipCoveredLiters: 0,
+      membershipCoveredCents: 0,
       currency: CURRENCY,
       pulsesPerLiter: safePulsesPerLiter,
       prevBalanceCents: walletSnapshot.balanceCents,
