@@ -44,8 +44,30 @@ router.get('/history', requireAuth, async (req, res) => {
     try { recharges = await rechargesPromise; } catch (e) { console.error('Error fetching recharges', e); }
     try { dispenses = await dispensesPromise; } catch (e) { console.error('Error fetching dispenses', e); }
 
+    const pendingProviderPaymentIds = recharges
+      .filter((r) => r.status === 'PENDING' && r.providerPaymentId)
+      .map((r) => r.providerPaymentId);
+
+    const postedRechargeCreditIds = new Set();
+    if (pendingProviderPaymentIds.length > 0) {
+      const postedCredits = await prisma.ledgerEntry.findMany({
+        where: {
+          userId,
+          type: 'CREDIT',
+          status: 'POSTED',
+          externalId: { in: pendingProviderPaymentIds },
+        },
+        select: { externalId: true },
+      });
+      postedCredits.forEach((entry) => {
+        if (entry.externalId) postedRechargeCreditIds.add(entry.externalId);
+      });
+    }
+
     const items = [
-      ...recharges.map(r => ({
+      ...recharges.map((r) => {
+        const status = postedRechargeCreditIds.has(r.providerPaymentId) ? 'SUCCEEDED' : r.status;
+        return {
         id: r.id,
         type: 'recharge',
         description: (r.bonusCents || 0) > 0 ? 'Recarga de saldo con bonificacion' : 'Recarga de saldo',
@@ -54,10 +76,11 @@ router.get('/history', requireAuth, async (req, res) => {
         totalReceivedAmount: ((r.amountCents || 0) + (r.bonusCents || 0)) / 100,
         currency: (r.currency || 'MXN').toUpperCase(),
         date: r.createdAt,
-        status: mapRechargeStatus(r.status),
+        status: mapRechargeStatus(status),
         paymentMethod: r.provider === 'STRIPE' ? 'Stripe' : r.provider,
         providerPaymentId: r.providerPaymentId || undefined,
-      })),
+        };
+      }),
       ...dispenses.map(d => ({
         id: d.id,
         type: 'dispensing',

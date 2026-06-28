@@ -400,6 +400,16 @@ router.get('/status/:id', requireAuth, async (req, res) => {
       select: { id: true, status: true, providerPaymentId: true, createdAt: true },
     });
     if (!recharge) return res.status(404).json({ error: 'Recarga no encontrada' });
+
+    if (recharge.status === 'PENDING' && recharge.providerPaymentId) {
+      const result = await reconcileOneRecharge({ ...recharge, userId });
+      return res.json({
+        id: recharge.id,
+        status: result.status,
+        providerPaymentId: recharge.providerPaymentId,
+      });
+    }
+
     res.json({ id: recharge.id, status: recharge.status, providerPaymentId: recharge.providerPaymentId });
   } catch (e) {
     console.error('GET /recharge/status error', e);
