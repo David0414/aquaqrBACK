@@ -60,8 +60,8 @@ const DEMO_ACTION_TO_COMMAND = Object.freeze({
   litros_20: '15',
   enjuague: '12',
   inicio_dispensado: '13',
-  pausar_llenado: '25',
-  reanudar_llenado: '26',
+  pausar_llenado: '24',
+  reanudar_llenado: '25',
 });
 const VALID_PROCESS_STAGE_CODES = new Set(['01', '02', '03', '04', '05', '06', '07', '08', '09']);
 
