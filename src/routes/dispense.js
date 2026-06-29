@@ -58,6 +58,8 @@ const DEMO_ACTION_TO_COMMAND = Object.freeze({
   litros_5: '11',
   litros_10: '14',
   litros_20: '15',
+  enjuague_si: '16',
+  enjuague_no: '17',
   enjuague: '12',
   inicio_dispensado: '13',
   pausar_llenado: '24',
