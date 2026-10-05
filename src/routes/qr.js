@@ -1,7 +1,7 @@
 const express = require('express');
 const QRCode = require('qrcode');
 const { prisma } = require('../db');
-const { requireAuthOrMonitorAdmin } = require('../utils/monitorAdmin');
+const { requireManagedMachine } = require('../utils/managementAccess');
 const { signMachineLink, verifyMachineLink } = require('../utils/qrSigning');
 
 const router = express.Router();
@@ -65,7 +65,7 @@ async function findMachine(machineId) {
   return null;
 }
 
-router.get('/generate', requireAuthOrMonitorAdmin, async (req, res) => {
+router.get('/generate', requireManagedMachine('query', 'machineId'), async (req, res) => {
   try {
     const machineId = normalizeMachineId(req.query.machineId);
     const kind = String(req.query.kind || 'permanent').toLowerCase();

@@ -9,6 +9,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
 });
 
 const { requireAuth } = require('../utils/auth');
+const { getRechargeHistoryItems } = require('../utils/rechargeHistory');
 const {
   getPromotionCatalog,
   applyRewardCreditTx,
@@ -102,22 +103,6 @@ async function hasMembershipRewardThisMonth(userId, promotionKey, now = new Date
     select: { id: true },
   });
   return Boolean(existing);
-}
-
-/** Mapea estatus de Prisma -> etiqueta de UI */
-function mapStatusToUi(status) {
-  switch (status) {
-    case 'SUCCEEDED':
-      return 'completed';
-    case 'FAILED':
-      return 'failed';
-    case 'PENDING':
-      return 'pending';
-    case 'CANCELED':
-      return 'cancelled';
-    default:
-      return 'completed';
-  }
 }
 
 async function settleRechargeSuccessTx(tx, recharge, actualAmountCents, currency, description = 'Recarga por Stripe') {
@@ -290,36 +275,17 @@ router.post('/create-intent', requireAuth, async (req, res) => {
 router.get('/history', requireAuth, async (req, res) => {
   try {
     const { userId } = req.auth;
-    const limit = Math.min(parseInt(req.query.limit || '20', 10), 50);
+    const limit = Math.max(1, Math.min(parseInt(req.query.limit || '20', 10) || 20, 50));
     const cursor = req.query.cursor || null;
 
-    const rows = await prisma.recharge.findMany({
-      where: { userId },
-      orderBy: { createdAt: 'desc' },
-      take: limit + 1, // pedimos una más para saber si hay más páginas
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-    });
+    const rows = await getRechargeHistoryItems(prisma, userId, { limit: limit + 1, cursor });
 
     const hasMore = rows.length > limit;
     const page = rows.slice(0, limit);
 
-    const items = page.map((r) => ({
-      id: r.id,
-      type: 'recharge',
-      description: (r.bonusCents || 0) > 0 ? 'Recarga de saldo con bonificacion' : 'Recarga de saldo',
-      amount: (r.amountCents || 0) / 100, // número en unidades para la UI
-      bonusAmount: (r.bonusCents || 0) / 100,
-      totalReceivedAmount: ((r.amountCents || 0) + (r.bonusCents || 0)) / 100,
-      currency: (r.currency || 'MXN').toUpperCase(),
-      date: r.createdAt,
-      status: mapStatusToUi(r.status),
-      paymentMethod: r.provider === 'STRIPE' ? 'Stripe' : r.provider,
-      providerPaymentId: r.providerPaymentId || undefined,
-    }));
-
     return res.json({
-      items,
-      nextCursor: hasMore ? rows[limit].id : null,
+      items: page,
+      nextCursor: hasMore ? page[page.length - 1].id : null,
       hasMore,
     });
   } catch (e) {

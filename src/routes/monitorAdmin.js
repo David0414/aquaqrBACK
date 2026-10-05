@@ -4,7 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const { prisma } = require('../db');
 const { signMachineLink } = require('../utils/qrSigning');
-const { requireAuthOrMonitorAdmin } = require('../utils/monitorAdmin');
+const { requireManagement, requireAdministrator, requireManagedMachine, machineScope, sendAccessError } = require('../utils/managementAccess');
+const { saveManagedMachine } = require('../utils/machineSettings');
 const { getPromotionCatalog, ensurePromotionCatalog } = require('../utils/rewards');
 
 const router = express.Router();
@@ -34,12 +35,6 @@ function normalizeMachineId(value) {
 function normalizeHardwareId(value) {
   const clean = String(value || '').trim().toUpperCase().replace(/[^0-9A-F]/g, '');
   return clean ? clean.padStart(2, '0').slice(-2) : null;
-}
-
-function moneyCentsFromInput(value, fallback = DEFAULT_PRICE_PER_GARRAFON_CENTS) {
-  const raw = Number(value);
-  if (!Number.isFinite(raw) || raw <= 0) return fallback;
-  return raw > 1000 ? Math.round(raw) : Math.round(raw * 100);
 }
 
 function listStickerMachines() {
@@ -110,12 +105,14 @@ function mergeMachines(dbMachines) {
   });
 }
 
-router.get('/machines', requireAuthOrMonitorAdmin, async (_req, res) => {
+router.get('/machines', requireManagement, async (req, res) => {
   try {
     const dbMachines = await prisma.machine.findMany({
+      where: machineScope(req.management),
+      include: { partner: { select: { id: true, name: true, email: true, managementAccessActive: true } } },
       orderBy: [{ isActive: 'desc' }, { id: 'asc' }],
     });
-    const machines = mergeMachines(dbMachines);
+    const machines = req.management.role === 'ADMIN' ? mergeMachines(dbMachines) : dbMachines;
     return res.json({ items: machines });
   } catch (error) {
     console.error('GET /api/monitor-admin/machines error', error);
@@ -123,71 +120,37 @@ router.get('/machines', requireAuthOrMonitorAdmin, async (_req, res) => {
   }
 });
 
-router.post('/machines', requireAuthOrMonitorAdmin, async (req, res) => {
+router.post('/machines', requireAdministrator, async (req, res) => {
   try {
     const id = normalizeMachineId(req.body?.id);
     if (!id) {
       return res.status(400).json({ error: 'id de maquina requerido' });
     }
 
-    const machine = await prisma.machine.upsert({
-      where: { id },
-      update: {
-        name: String(req.body?.name || '').trim() || null,
-        location: String(req.body?.location || '').trim() || null,
-        address: String(req.body?.address || '').trim() || null,
-        hardwareId: normalizeHardwareId(req.body?.hardwareId),
-        pricePerGarrafonCents: moneyCentsFromInput(req.body?.pricePerGarrafonCents ?? req.body?.pricePerGarrafon),
-        status: String(req.body?.status || 'ONLINE').trim().toUpperCase() || 'ONLINE',
-        isActive: req.body?.isActive !== false,
-      },
-      create: {
-        id,
-        name: String(req.body?.name || '').trim() || null,
-        location: String(req.body?.location || '').trim() || null,
-        address: String(req.body?.address || '').trim() || null,
-        hardwareId: normalizeHardwareId(req.body?.hardwareId),
-        pricePerGarrafonCents: moneyCentsFromInput(req.body?.pricePerGarrafonCents ?? req.body?.pricePerGarrafon),
-        status: String(req.body?.status || 'ONLINE').trim().toUpperCase() || 'ONLINE',
-        isActive: req.body?.isActive !== false,
-      },
-    });
+    const machine = await saveManagedMachine(prisma, req.management, id, req.body || {}, true);
 
     return res.json({ ok: true, machine });
   } catch (error) {
-    console.error('POST /api/monitor-admin/machines error', error);
-    return res.status(500).json({ error: 'No se pudo guardar la maquina' });
+    return sendAccessError(res, error);
   }
 });
 
-router.put('/machines/:id', requireAuthOrMonitorAdmin, async (req, res) => {
+router.put('/machines/:id', requireManagedMachine(), async (req, res) => {
   try {
     const id = normalizeMachineId(req.params.id);
     if (!id) {
       return res.status(400).json({ error: 'id de maquina invalido' });
     }
 
-    const machine = await prisma.machine.update({
-      where: { id },
-      data: {
-        name: String(req.body?.name || '').trim() || null,
-        location: String(req.body?.location || '').trim() || null,
-        address: String(req.body?.address || '').trim() || null,
-        hardwareId: normalizeHardwareId(req.body?.hardwareId),
-        pricePerGarrafonCents: moneyCentsFromInput(req.body?.pricePerGarrafonCents ?? req.body?.pricePerGarrafon),
-        status: String(req.body?.status || 'ONLINE').trim().toUpperCase() || 'ONLINE',
-        isActive: req.body?.isActive !== false,
-      },
-    });
+    const machine = await saveManagedMachine(prisma, req.management, id, req.body || {});
 
     return res.json({ ok: true, machine });
   } catch (error) {
-    console.error('PUT /api/monitor-admin/machines/:id error', error);
-    return res.status(500).json({ error: 'No se pudo actualizar la maquina' });
+    return sendAccessError(res, error);
   }
 });
 
-router.delete('/machines/:id', requireAuthOrMonitorAdmin, async (req, res) => {
+router.delete('/machines/:id', requireAdministrator, async (req, res) => {
   try {
     const id = normalizeMachineId(req.params.id);
     if (!id) {
@@ -207,7 +170,7 @@ router.delete('/machines/:id', requireAuthOrMonitorAdmin, async (req, res) => {
   }
 });
 
-router.get('/machines/:id/qr', requireAuthOrMonitorAdmin, async (req, res) => {
+router.get('/machines/:id/qr', requireManagedMachine(), async (req, res) => {
   try {
     const id = normalizeMachineId(req.params.id);
     if (!id) {
@@ -244,7 +207,7 @@ router.get('/machines/:id/qr', requireAuthOrMonitorAdmin, async (req, res) => {
   }
 });
 
-router.get('/promotions', requireAuthOrMonitorAdmin, async (_req, res) => {
+router.get('/promotions', requireAdministrator, async (_req, res) => {
   try {
     const promotions = await getPromotionCatalog(prisma);
     return res.json({ items: promotions });
@@ -254,7 +217,7 @@ router.get('/promotions', requireAuthOrMonitorAdmin, async (_req, res) => {
   }
 });
 
-router.put('/promotions/:key', requireAuthOrMonitorAdmin, async (req, res) => {
+router.put('/promotions/:key', requireAdministrator, async (req, res) => {
   try {
     await ensurePromotionCatalog(prisma);
     const key = String(req.params.key || '').trim();
@@ -282,17 +245,25 @@ router.put('/promotions/:key', requireAuthOrMonitorAdmin, async (req, res) => {
   }
 });
 
-router.get('/summary', requireAuthOrMonitorAdmin, async (_req, res) => {
+router.get('/summary', requireManagement, async (req, res) => {
   try {
     const [dbMachines, promotions] = await Promise.all([
-      prisma.machine.findMany({ orderBy: [{ isActive: 'desc' }, { id: 'asc' }] }),
-      getPromotionCatalog(prisma),
+      prisma.machine.findMany({ where: machineScope(req.management),
+        include: { partner: { select: { id: true, name: true, email: true, managementAccessActive: true } } },
+        orderBy: [{ isActive: 'desc' }, { id: 'asc' }] }),
+      req.management.role === 'ADMIN' ? getPromotionCatalog(prisma) : Promise.resolve([]),
     ]);
-    const machines = mergeMachines(dbMachines);
+    const machines = req.management.role === 'ADMIN' ? mergeMachines(dbMachines) : dbMachines;
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const sales = await prisma.dispense.aggregate({ where: { machineId: { in: dbMachines.map((machine) => machine.id) },
+      status: 'COMPLETED', createdAt: { gte: since } }, _sum: { liters: true, totalCents: true }, _count: { _all: true } });
 
     return res.json({
       machines,
+      role: req.management.role,
+      name: req.management.name || null,
       promotions,
+      sales: { periodDays: 30, transactions: sales._count._all, liters: sales._sum.liters || 0, revenueCents: sales._sum.totalCents || 0 },
       counts: {
         machines: machines.length,
         activeMachines: machines.filter((machine) => machine.isActive).length,

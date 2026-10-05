@@ -1,6 +1,5 @@
 const express = require('express');
-const { prisma } = require('../db');
-const { requireAuthOrMonitorAdmin } = require('../utils/monitorAdmin');
+const { requireManagedMachine } = require('../utils/managementAccess');
 const { ingestTelemetry, getTelemetryByHardwareId, normalizeHardwareId } = require('../utils/telemetryStore');
 
 const router = express.Router();
@@ -38,15 +37,16 @@ router.post('/push', async (req, res) => {
   }
 });
 
-router.get('/machine/:machineId', requireAuthOrMonitorAdmin, async (req, res) => {
+router.get('/machine/:machineId', requireManagedMachine('params', 'machineId'), async (req, res) => {
   try {
     const machineId = normalizeMachineId(req.params.machineId);
     if (!machineId) {
       return res.status(400).json({ error: 'machineId invalido' });
     }
 
-    const machine = await prisma.machine.findUnique({ where: { id: machineId } });
-    const hardwareId = normalizeHardwareId(machine?.hardwareId || machineId);
+    const machine = req.managedMachine;
+    const hardwareId = normalizeHardwareId(machine.hardwareId);
+    if (!hardwareId) return res.status(400).json({ error: 'El administrador debe configurar el hardware de esta máquina' });
     const telemetry = getTelemetryByHardwareId(hardwareId);
 
     if (!telemetry) {

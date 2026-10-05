@@ -5,6 +5,8 @@ const net = require('net');
 
 const { prisma } = require('../db');           // 👈 usa el singleton SIEMPRE
 const { requireAuth } = require('../utils/auth');
+const { requireAuthOrMonitorAdmin } = require('../utils/monitorAdmin');
+const { getManagementPrincipal, getManagedMachine, requireManagedMachine, sendAccessError } = require('../utils/managementAccess');
 const { sendUserNotification } = require('../utils/notifications');
 
 /* ----------------------------------------------------------------------------- */
@@ -33,8 +35,6 @@ const MACHINE_LOCK_TTL_MS = intFromEnv('MACHINE_LOCK_TTL_MS', 20 * 60 * 1000);
 const IDLE_LOCK_RELEASE_MS = intFromEnv('IDLE_LOCK_RELEASE_MS', 8000);
 const SINGLE_MACHINE_MODE = String(process.env.SINGLE_MACHINE_MODE || 'false').toLowerCase() === 'true';
 const DEFAULT_MACHINE_HARDWARE_ID = normalizeHardwareId(process.env.DEFAULT_MACHINE_HARDWARE_ID || '01');
-const MONITOR_ADMIN_USER = process.env.MONITOR_ADMIN_USER || 'admin';
-const MONITOR_ADMIN_PASSWORD = process.env.MONITOR_ADMIN_PASSWORD || '123';
 const QR_INICIO_DEDUP_MS = intFromEnv('QR_INICIO_DEDUP_MS', 9000);
 
 // Opciones de litros: 1/4, 1/2 y completo.
@@ -298,21 +298,6 @@ async function chargeDispenseIfMissingTx(tx, existing) {
     chargedCents: chargedAlreadyCents + amountToChargeCents,
     ledgerId: ledger.id,
   };
-}
-
-function isMonitorAdminRequest(req) {
-  const user = String(req.headers['x-monitor-user'] || '').trim();
-  const password = String(req.headers['x-monitor-password'] || '').trim();
-  return user === MONITOR_ADMIN_USER && password === MONITOR_ADMIN_PASSWORD;
-}
-
-function requireAuthOrMonitorAdmin(req, res, next) {
-  if (isMonitorAdminRequest(req)) {
-    req.auth = { userId: 'agua24-monitor-admin', monitorAdmin: true };
-    return next();
-  }
-
-  return requireAuth(req, res, next);
 }
 
 function normalizeMachineId(value) {
@@ -1614,8 +1599,9 @@ router.get('/config', async (req, res) => {
   }
 });
 
-router.post('/config/pulses', requireAuthOrMonitorAdmin, (req, res) => {
-  const hardwareId = controlHardwareId(req.body?.hardwareId, req.body?.machineId);
+router.post('/config/pulses', requireManagedMachine('body', 'machineId', true), (req, res) => {
+  const hardwareId = normalizeHardwareId(req.managedMachine.hardwareId);
+  if (!hardwareId) return res.status(400).json({ error: 'Configura el hardware de la máquina antes de calibrarla' });
   const pulsesPerLiter = updatePulsesPerLiterForHardware(req.body?.pulsesPerLiter, hardwareId);
   return res.json({
     ok: true,
@@ -1831,8 +1817,19 @@ router.post('/demo/control', requireAuthOrMonitorAdmin, async (req, res) => {
     const { userId } = req.auth;
     requestUserId = userId;
 
-    await ensureUserAndWallet(userId);
-    if (!req.auth?.monitorAdmin) {
+    const maintenanceActions = new Set(['bomba_on', 'bomba_off', 'valvula_enjuague_on', 'valvula_enjuague_off',
+      'valvula_llenado_on', 'valvula_llenado_off', 'apagar_valvulas_forzado', 'reiniciar_sistema']);
+    const managementCommand = maintenanceActions.has(action) || req.body?.management === true || req.auth?.monitorAdmin;
+    if (managementCommand) {
+      const principal = await getManagementPrincipal(req.auth);
+      const managedMachine = await getManagedMachine(principal, machineId, req.body?.hardwareId);
+      hardwareId = normalizeHardwareId(managedMachine.hardwareId);
+      if (!hardwareId) throw Object.assign(new Error('Configura el hardware de esta máquina'), { statusCode: 400 });
+      machineId = managedMachine.id;
+    } else {
+      await ensureUserAndWallet(userId);
+    }
+    if (!managementCommand) {
       if (action === 'qr_inicio') {
         await acquireMachineLock(machineId, userId, {
           hardwareId,
@@ -1883,6 +1880,7 @@ router.post('/demo/control', requireAuthOrMonitorAdmin, async (req, res) => {
       return sendMachineBusy(res, e);
     }
 
+    if ([401, 403, 404, 409].includes(e.statusCode)) return sendAccessError(res, e);
     if (e.statusCode === 400) {
       return res.status(400).json({
         error: e.message,
@@ -1900,7 +1898,14 @@ router.post('/demo/control', requireAuthOrMonitorAdmin, async (req, res) => {
 router.get('/demo/monitor', requireAuthOrMonitorAdmin, async (req, res) => {
   let hardwareId = controlHardwareId(req.query?.hardwareId, req.query?.machineId);
 
-  if (!req.auth?.monitorAdmin && req.auth?.userId) {
+  if (req.query?.management === 'true' || req.auth?.monitorAdmin) {
+    try {
+      const principal = await getManagementPrincipal(req.auth);
+      const machine = await getManagedMachine(principal, req.query?.machineId, req.query?.hardwareId);
+      hardwareId = normalizeHardwareId(machine.hardwareId);
+      if (!hardwareId) return res.status(400).json({ error: 'Configura el hardware de esta máquina' });
+    } catch (error) { return sendAccessError(res, error); }
+  } else if (req.auth?.userId) {
     const activeLock = await resolveOwnLockForCommand(
       req.auth.userId,
       'monitor',

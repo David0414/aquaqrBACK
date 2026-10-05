@@ -322,14 +322,14 @@ async function saveUserPromotionSelections(client, userId, promotionKeys, now = 
   const selectionMonthKey = monthKey(startOfMonth(now));
   const selectablePromotions = getMonthlySelectablePromotions(resolvedPromotions);
   const selectableKeys = new Set(selectablePromotions.map((promotion) => promotion.key));
-  const maxCount = Math.min(2, selectablePromotions.length);
+  const maxCount = Math.min(1, selectablePromotions.length);
   const uniqueKeys = [...new Set((promotionKeys || []).filter(Boolean))];
   const selectedPromotions = uniqueKeys.map((key) => getPromotionByKey(resolvedPromotions, key)).filter(Boolean);
   const selectedMemberships = selectedPromotions.filter((promotion) => promotion.kind === 'membership');
 
   if (uniqueKeys.length < 1 || uniqueKeys.length > maxCount) {
     throw new Error(maxCount > 0
-      ? `Elige de 1 a ${maxCount} promociones`
+      ? 'Elige una promocion'
       : 'No hay promociones para elegir');
   }
 
@@ -388,7 +388,7 @@ async function getUserPromotionSelectionState(client, userId, now = new Date(), 
   const resolvedPromotions = await resolvePromotions(client, promotions);
   const selectionMonthKey = monthKey(startOfMonth(now));
   const selectablePromotions = getMonthlySelectablePromotions(resolvedPromotions);
-  const requiredCount = Math.min(2, selectablePromotions.length);
+  const requiredCount = Math.min(1, selectablePromotions.length);
   const selectableKeys = new Set(selectablePromotions.map((promotion) => promotion.key));
   const selections = await getUserPromotionSelections(client, userId, selectionMonthKey, { now, activeOnly: true });
   const selectedPromotionKeys = selections

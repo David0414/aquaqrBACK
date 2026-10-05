@@ -3,16 +3,7 @@ const express = require('express');
 const router = express.Router();
 const { prisma } = require('../db');   // 👈 usa el singleton
 const { requireAuth } = require('../utils/auth');
-
-function mapRechargeStatus(s) {
-  switch (s) {
-    case 'SUCCEEDED': return 'completed';
-    case 'FAILED':    return 'failed';
-    case 'PENDING':   return 'pending';
-    case 'CANCELED':  return 'cancelled';
-    default:          return 'completed';
-  }
-}
+const { getRechargeHistoryItems } = require('../utils/rechargeHistory');
 function mapDispenseStatus(s) {
   switch (s) {
     case 'COMPLETED': return 'completed';
@@ -26,13 +17,9 @@ function mapDispenseStatus(s) {
 router.get('/history', requireAuth, async (req, res) => {
   try {
     const { userId } = req.auth;
-    const limit = Math.min(parseInt(req.query.limit || '100', 10), 200);
+    const limit = Math.max(1, Math.min(parseInt(req.query.limit || '100', 10) || 100, 200));
 
-    const rechargesPromise = prisma.recharge.findMany({
-      where: { userId },
-      orderBy: { id: 'desc' },
-      take: limit
-    });
+    const rechargesPromise = getRechargeHistoryItems(prisma, userId, { limit });
 
     const dispensesPromise = prisma.dispense.findMany({
       where: { userId },
@@ -40,47 +27,10 @@ router.get('/history', requireAuth, async (req, res) => {
       take: limit
     });
 
-    let recharges = [], dispenses = [];
-    try { recharges = await rechargesPromise; } catch (e) { console.error('Error fetching recharges', e); }
-    try { dispenses = await dispensesPromise; } catch (e) { console.error('Error fetching dispenses', e); }
-
-    const pendingProviderPaymentIds = recharges
-      .filter((r) => r.status === 'PENDING' && r.providerPaymentId)
-      .map((r) => r.providerPaymentId);
-
-    const postedRechargeCreditIds = new Set();
-    if (pendingProviderPaymentIds.length > 0) {
-      const postedCredits = await prisma.ledgerEntry.findMany({
-        where: {
-          userId,
-          type: 'CREDIT',
-          status: 'POSTED',
-          externalId: { in: pendingProviderPaymentIds },
-        },
-        select: { externalId: true },
-      });
-      postedCredits.forEach((entry) => {
-        if (entry.externalId) postedRechargeCreditIds.add(entry.externalId);
-      });
-    }
+    const [recharges, dispenses] = await Promise.all([rechargesPromise, dispensesPromise]);
 
     const items = [
-      ...recharges.map((r) => {
-        const status = postedRechargeCreditIds.has(r.providerPaymentId) ? 'SUCCEEDED' : r.status;
-        return {
-        id: r.id,
-        type: 'recharge',
-        description: (r.bonusCents || 0) > 0 ? 'Recarga de saldo con bonificacion' : 'Recarga de saldo',
-        amount: (r.amountCents || 0) / 100,
-        bonusAmount: (r.bonusCents || 0) / 100,
-        totalReceivedAmount: ((r.amountCents || 0) + (r.bonusCents || 0)) / 100,
-        currency: (r.currency || 'MXN').toUpperCase(),
-        date: r.createdAt,
-        status: mapRechargeStatus(status),
-        paymentMethod: r.provider === 'STRIPE' ? 'Stripe' : r.provider,
-        providerPaymentId: r.providerPaymentId || undefined,
-        };
-      }),
+      ...recharges,
       ...dispenses.map(d => ({
         id: d.id,
         type: 'dispensing',

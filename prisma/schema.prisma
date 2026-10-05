@@ -13,6 +13,12 @@ enum Provider {
   MERCADOPAGO
 }
 
+enum UserRole {
+  CUSTOMER
+  PARTNER
+  ADMIN
+}
+
 enum RechargeStatus {
   PENDING
   SUCCEEDED
@@ -45,6 +51,9 @@ model User {
   name      String?
   phone     String?
   createdAt DateTime @default(now())
+  role      UserRole @default(CUSTOMER)
+  managementAccessActive Boolean @default(true)
+  ownedMachines Machine[] @relation("PartnerMachines")
 
   wallet     Wallet?
   recharges  Recharge[]
@@ -181,6 +190,8 @@ model Machine {
   location              String?
   address               String?
   hardwareId            String?
+  partnerId             String?
+  partner               User? @relation("PartnerMachines", fields: [partnerId], references: [id], onDelete: SetNull)
   pricePerGarrafonCents Int      @default(3500)
   status                String   @default("ONLINE")
   isActive              Boolean  @default(true)
@@ -189,6 +200,7 @@ model Machine {
 
   @@index([isActive])
   @@index([hardwareId])
+  @@index([partnerId])
 }
 
 model AppPromotion {
