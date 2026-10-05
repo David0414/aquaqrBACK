@@ -26,7 +26,9 @@ También normaliza los identificadores hexadecimales de hardware a dos caractere
 Variables del backend para el acceso administrativo:
 
 - El administrador también debe tener una cuenta de Clerk. Ya no hay un formulario
-  separado de acceso administrativo ni botones para elegir el tipo de usuario.
+  separado de acceso administrativo. El botón inferior **Entrar como socio o
+  administrador** abre una presentación del acceso para gestión, usando la misma
+  cuenta y los permisos guardados en la base de datos.
 - `MONITOR_ADMIN_USER` y `MONITOR_ADMIN_PASSWORD`: se mantienen únicamente para
   compatibilidad del backend con el acceso administrativo anterior. El frontend
   utiliza la identidad y el rol de la cuenta autenticada.
@@ -47,8 +49,10 @@ template JWT `aquaqr-api` que ya utilizaba la aplicación.
 4. Selecciona una máquina registrada y el socio responsable; pulsa
    **Guardar asignación**. Si la máquina solo se detectó por un sticker, primero
    debe registrarla en **Máquinas** con su identificador de hardware.
-5. El socio inicia sesión en el mismo formulario que todos los usuarios y la
-   aplicación abre automáticamente su panel.
+5. El socio pulsa **Entrar como socio o administrador**, debajo del acceso habitual,
+   e inicia sesión con su cuenta. La aplicación abre automáticamente su panel;
+   una cuenta administradora abre el panel de administración. El acceso habitual
+   también dirige cada cuenta al panel que corresponde a su rol.
 
 ## Asignar la primera cuenta administradora desde Supabase
 
