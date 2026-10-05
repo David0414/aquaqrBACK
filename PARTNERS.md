@@ -1,9 +1,11 @@
 # Panel de socios y asignación de máquinas
 
 El administrador ve todas las máquinas y todos los socios en `/water-monitor`.
-Todas las cuentas usan el mismo formulario de Clerk. Al iniciar sesión, el rol
-guardado en la base de datos determina el panel: `ADMIN` abre `/water-monitor`,
-`PARTNER` abre `/partner-panel` y `CUSTOMER` abre `/home-dashboard`. Los accesos
+El administrador entra con **usuario y contraseña**, sin correo ni cuenta de
+Clerk, y abre `/water-monitor`. El socio entra con su **correo** mediante Clerk
+y abre `/partner-panel`; el cliente usa su cuenta habitual y abre
+`/home-dashboard`. El botón inferior **Entrar como socio o administrador** abre
+un acceso con dos opciones: **Socio** y **Administrador**. Los accesos
 directos a otros paneles redirigen al panel de la cuenta. Cada socio administra las
 máquinas que tiene asignadas. Una cuenta de cliente no tiene permisos de gestión.
 Las comprobaciones de rol, suspensión y propiedad se hacen en el backend en cada
@@ -25,13 +27,11 @@ También normaliza los identificadores hexadecimales de hardware a dos caractere
 
 Variables del backend para el acceso administrativo:
 
-- El administrador también debe tener una cuenta de Clerk. Ya no hay un formulario
-  separado de acceso administrativo. El botón inferior **Entrar como socio o
-  administrador** abre una presentación del acceso para gestión, usando la misma
-  cuenta y los permisos guardados en la base de datos.
-- `MONITOR_ADMIN_USER` y `MONITOR_ADMIN_PASSWORD`: se mantienen únicamente para
-  compatibilidad del backend con el acceso administrativo anterior. El frontend
-  utiliza la identidad y el rol de la cuenta autenticada.
+- `MONITOR_ADMIN_USER` y `MONITOR_ADMIN_PASSWORD`: usuario y contraseña del
+  administrador, configurados solamente en el backend. No hay credenciales
+  predeterminadas. El formulario valida los datos en `/api/management/login`
+  y recibe una sesión firmada que vence a las ocho horas. El navegador conserva
+  el token en `sessionStorage`; no guarda la contraseña. Al cerrar sesión lo elimina.
 - `ADMIN_CLERK_USER_IDS` (opcional): IDs de Clerk separados por comas para cuentas
   que deben ser administradoras. Esas cuentas pueden entrar con el acceso habitual.
 - `CLERK_SECRET_KEY`: necesaria para verificar la identidad de la cuenta del socio
@@ -50,25 +50,19 @@ template JWT `aquaqr-api` que ya utilizaba la aplicación.
    **Guardar asignación**. Si la máquina solo se detectó por un sticker, primero
    debe registrarla en **Máquinas** con su identificador de hardware.
 5. El socio pulsa **Entrar como socio o administrador**, debajo del acceso habitual,
-   e inicia sesión con su cuenta. La aplicación abre automáticamente su panel;
-   una cuenta administradora abre el panel de administración. El acceso habitual
+   elige **Socio** e inicia sesión con su correo. La aplicación abre su panel.
+   Para entrar como administrador, elegir **Administrador** e ingresar el usuario
+   y la contraseña configurados en el backend. El acceso habitual
    también dirige cada cuenta al panel que corresponde a su rol.
 
-## Asignar la primera cuenta administradora desde Supabase
+## Configurar el primer administrador
 
-La migración deja los usuarios existentes como clientes. Para que la cuenta del
-administrador pueda usar el acceso único, debe tener `role = 'ADMIN'`. Se puede
-configurar `ADMIN_CLERK_USER_IDS` o actualizar la cuenta en el SQL Editor de
-Supabase. Copiar el ID real de esa cuenta desde Clerk y sustituir el ejemplo:
+Configurar `MONITOR_ADMIN_USER` y `MONITOR_ADMIN_PASSWORD` en las variables del
+servidor y reiniciar el backend. El acceso por usuario y contraseña no necesita
+crear un usuario administrador en Supabase ni registrar un correo en Clerk.
+La migración de socios y propietarios descrita arriba sí debe estar aplicada.
 
-```sql
-INSERT INTO public."User" ("id", "clerkId", "role", "managementAccessActive")
-VALUES ('user_ID_REAL_DEL_ADMIN', 'user_ID_REAL_DEL_ADMIN', 'ADMIN', true)
-ON CONFLICT ("id") DO UPDATE
-SET "role" = 'ADMIN', "managementAccessActive" = true;
-```
-
-No hay cambios adicionales de esquema para el acceso único. Las cuentas nuevas
+No hay cambios adicionales de esquema para separar los accesos. Las cuentas nuevas
 continúan siendo clientes; solo un administrador puede habilitarlas como socios.
 
 Un socio puede tener varias máquinas; cada máquina tiene un solo socio responsable.
