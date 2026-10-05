@@ -43,6 +43,7 @@ function isMonitorAdminRequest(req) {
 }
 
 function requireAuthOrMonitorAdmin(req, res, next) {
+  if (req.headers.authorization) return requireAuth(req, res, next);
   if (isMonitorAdminRequest(req)) {
     req.auth = { userId: 'agua24-monitor-admin', monitorAdmin: true };
     return next();

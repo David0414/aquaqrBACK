@@ -29,8 +29,8 @@ router.get('/me', requireAuthOrMonitorAdmin, async (req, res) => {
   try {
     const principal = await getManagementPrincipal(req.auth);
     res.set('Cache-Control', 'no-store');
-    return res.json({ ...principal, canManage: canManage(principal), defaultPath: canManage(principal) ?
-      (principal.role === 'ADMIN' ? '/water-monitor' : '/partner-panel') : '/home-dashboard' });
+    return res.json({ ...principal, canManage: canManage(principal), defaultPath:
+      principal.role === 'ADMIN' ? '/water-monitor' : principal.role === 'PARTNER' ? '/partner-panel' : '/home-dashboard' });
   } catch (error) { return sendAccessError(res, error); }
 });
 

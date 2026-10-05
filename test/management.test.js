@@ -102,6 +102,28 @@ test('requires authenticated management roles rather than client role flags', as
   assert.equal((await request('/monitor/promotions/topup_bonus', 'partner-1', 'PUT', { isActive: false })).status, 403);
 });
 
+test('the same sign-in resolves the account panel from its saved role', async () => {
+  for (const [id, role, path] of [['admin', 'ADMIN', '/water-monitor'], ['partner-1', 'PARTNER', '/partner-panel'], ['customer', 'CUSTOMER', '/home-dashboard']]) {
+    const result = await request('/management/me', id);
+    assert.equal(result.status, 200);
+    assert.equal(result.data.role, role);
+    assert.equal(result.data.defaultPath, path);
+  }
+  users.find((user) => user.id === 'partner-1').managementAccessActive = false;
+  const suspended = await request('/management/me', 'partner-1');
+  assert.equal(suspended.data.canManage, false);
+  assert.equal(suspended.data.defaultPath, '/partner-panel');
+});
+
+test('an old administrative session cannot override the signed-in customer identity', async () => {
+  const { token } = monitorAuth.createAdminSession();
+  const headers = { 'X-Monitor-Session': token };
+  const current = await request('/management/me', 'customer', 'GET', undefined, headers);
+  assert.equal(current.data.role, 'CUSTOMER');
+  assert.equal((await request('/monitor/summary', 'customer', 'GET', undefined, headers)).status, 403);
+  assert.equal((await request('/management/me', 'invalid-account', 'GET', undefined, headers)).status, 401);
+});
+
 test('partner catalogs, sales totals and telemetry are limited to assigned machines', async () => {
   const result = await request('/monitor/summary', 'partner-1');
   assert.equal(result.status, 200);
