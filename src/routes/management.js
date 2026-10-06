@@ -1,7 +1,8 @@
 const express = require('express');
 const { createClerkClient } = require('@clerk/backend');
 const { prisma } = require('../db');
-const { requireAuthOrMonitorAdmin, validAdminCredentials, createAdminSession } = require('../utils/monitorAdmin');
+const { requireAuthOrMonitorAdmin, createAdminSession } = require('../utils/monitorAdmin');
+const { authenticateAdmin } = require('../utils/adminAccounts');
 const { getManagementPrincipal, canManage, requireAdministrator, sendAccessError, normalizeMachineId } = require('../utils/managementAccess');
 
 const router = express.Router();
@@ -9,20 +10,24 @@ const loginAttempts = new Map();
 const partnerSelect = { id: true, name: true, email: true, role: true, managementAccessActive: true,
   ownedMachines: { select: { id: true, name: true, location: true, isActive: true }, orderBy: { id: 'asc' } } };
 
-router.post('/login', (req, res) => {
+router.post('/login', async (req, res) => {
   const now = Date.now();
   for (const [key, attempt] of loginAttempts) if (attempt.expiresAt <= now) loginAttempts.delete(key);
   const key = req.ip;
   const attempt = loginAttempts.get(key) || { count: 0, expiresAt: now + 15 * 60 * 1000 };
   if (attempt.count >= 10) return res.status(429).json({ error: 'Demasiados intentos. Intenta nuevamente en 15 minutos.' });
-  if (!validAdminCredentials(String(req.body?.user || '').trim(), req.body?.password)) {
-    attempt.count += 1;
-    loginAttempts.set(key, attempt);
-    return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
+  attempt.count += 1;
+  loginAttempts.set(key, attempt);
+  try {
+    const identity = await authenticateAdmin(String(req.body?.user || '').trim(), req.body?.password);
+    if (!identity) return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
+    const session = createAdminSession(now, identity);
+    loginAttempts.delete(key);
+    res.set('Cache-Control', 'no-store');
+    return res.json({ role: 'ADMIN', ...session });
+  } catch {
+    return res.status(503).json({ error: 'No se pudo iniciar sesión. Revisa la configuración del servidor e intenta nuevamente.' });
   }
-  loginAttempts.delete(key);
-  res.set('Cache-Control', 'no-store');
-  return res.json({ role: 'ADMIN', ...createAdminSession(now) });
 });
 
 router.get('/me', requireAuthOrMonitorAdmin, async (req, res) => {

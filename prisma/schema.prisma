@@ -53,6 +53,7 @@ model User {
   createdAt DateTime @default(now())
   role      UserRole @default(CUSTOMER)
   managementAccessActive Boolean @default(true)
+  adminCredential AdminCredential?
   ownedMachines Machine[] @relation("PartnerMachines")
 
   wallet     Wallet?
@@ -66,6 +67,13 @@ model User {
   memberships UserMembership[]
 
   notificationSettings NotificationSettings?
+}
+
+model AdminCredential {
+  username     String @id
+  userId       String @unique
+  passwordHash String
+  user         User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model Wallet {

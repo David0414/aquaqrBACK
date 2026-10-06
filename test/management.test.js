@@ -6,7 +6,7 @@ const express = require('express');
 process.env.MONITOR_ADMIN_USER = 'fixture-admin';
 process.env.MONITOR_ADMIN_PASSWORD = 'fixture-password';
 process.env.QR_SIGNING_SECRET = 'fixture-qr-secret';
-let users = [], machines = [], clerkAccounts = [];
+let users = [], machines = [], clerkAccounts = [], adminCredentials = [], credentialError = null;
 const matches = (row, where = {}) => Object.entries(where).every(([key, value]) => {
   if (value && typeof value === 'object') {
     if ('not' in value) return row[key] != null && row[key] !== value.not;
@@ -16,6 +16,13 @@ const matches = (row, where = {}) => Object.entries(where).every(([key, value]) 
 });
 const withPartner = (machine) => machine && ({ ...machine, partner: users.find((user) => user.id === machine.partnerId) || null });
 const db = {
+  adminCredential: {
+    findUnique: async ({ where }) => {
+      if (credentialError) throw credentialError;
+      const account = adminCredentials.find((item) => matches(item, where));
+      return account ? { ...account, user: users.find((user) => user.id === account.userId) || null } : null;
+    },
+  },
   user: {
     findUnique: async ({ where }) => users.find((user) => matches(user, where)) || null,
     findFirst: async ({ where }) => users.find((user) => matches(user, where)) || null,
@@ -37,7 +44,7 @@ const db = {
   dispense: { aggregate: async ({ where }) => ({ _count: { _all: where.machineId.in.length },
     _sum: { liters: where.machineId.in.length * 20, totalCents: where.machineId.in.length * 3500 } }) },
   userMembership: { aggregate: async () => ({ _count: { _all: 0 }, _sum: { pricePaidCents: 0 } }) },
-  appPromotion: { upsert: async ({ create }) => create, findMany: async () => [] },
+  appPromotion: { upsert: async ({ create }) => create, findMany: async () => [], updateMany: async () => ({ count: 0 }) },
   $transaction: async (run) => run(db),
 };
 const dbPath = require.resolve('../src/db');
@@ -76,6 +83,8 @@ test.before(async () => {
 test.after(() => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve); }));
 test.beforeEach(() => {
   clerkAccounts = [];
+  adminCredentials = [];
+  credentialError = null;
   users = [
     { id: 'admin', role: 'ADMIN', managementAccessActive: true },
     { id: 'partner-1', role: 'PARTNER', name: 'Socio Uno', managementAccessActive: true },
@@ -222,4 +231,86 @@ test('granting partner access uses a verified account identity, never an editabl
   assert.equal((await findPartnerAccount({ email: 'SOCIO@example.com' }, clerk)).id, 'user_verified');
   account.emailAddresses[0].verification.status = 'unverified';
   await assert.rejects(findPartnerAccount({ email: 'socio@example.com' }, clerk), /correo verificado/);
+});
+
+test('the Supabase administrator signs in with username and password and opens the full admin panel', async () => {
+  const sql = require('fs').readFileSync(require('path').join(__dirname, '../CREAR_ADMIN_SUPABASE.sql'), 'utf8');
+  const passwordHash = sql.match(/scrypt\$[a-f0-9]{32}\$[a-f0-9]{128}/)[0];
+  adminCredentials.push({ username: 'administrador', userId: 'admin', passwordHash });
+  assert.equal((await request('/management/login', null, 'POST', { user: 'administrador', password: 'incorrecta' })).status, 401);
+  const login = await request('/management/login', null, 'POST', { user: 'administrador', password: '123' });
+  assert.equal(login.status, 200);
+  assert.equal(login.data.role, 'ADMIN');
+  assert.equal(login.data.passwordHash, undefined);
+  const headers = { 'X-Monitor-Session': login.data.token };
+  const me = await request('/management/me', null, 'GET', undefined, headers);
+  assert.equal(me.data.userId, 'admin');
+  assert.equal(me.data.defaultPath, '/water-monitor');
+  assert.equal((await request('/monitor/summary', null, 'GET', undefined, headers)).data.counts.machines, 3);
+  assert.equal((await request('/management/partners', null, 'GET', undefined, headers)).data.items.length, 2);
+  assert.equal(monitorAuth.validAdminSession(login.data.token, login.data.expiresAt), false);
+  assert.equal((await request('/management/me', null, 'GET', undefined, { 'X-Monitor-Session': login.data.token + 'altered' })).status, 401);
+  assert.equal((await request('/management/me', 'customer', 'GET', undefined, headers)).data.role, 'CUSTOMER');
+});
+
+test('password changes, suspension, role changes and deletion revoke existing database admin sessions', async () => {
+  const { hashAdminPassword } = require('../src/utils/adminAccounts');
+  const passwordHash = await hashAdminPassword('123');
+  const account = { username: 'administrador', userId: 'admin', passwordHash };
+  adminCredentials.push(account);
+  const login = await request('/management/login', null, 'POST', { user: 'administrador', password: '123' });
+  assert.equal(login.status, 200);
+  const headers = { 'X-Monitor-Session': login.data.token };
+  const user = users.find((item) => item.id === 'admin');
+  for (const change of [{ managementAccessActive: false }, { role: 'CUSTOMER' }]) {
+    Object.assign(user, change);
+    assert.equal((await request('/management/me', null, 'GET', undefined, headers)).status, 401);
+    assert.equal((await request('/management/login', null, 'POST', { user: 'administrador', password: '123' })).status, 401);
+    Object.assign(user, { role: 'ADMIN', managementAccessActive: true });
+  }
+  account.passwordHash = await hashAdminPassword('nueva');
+  assert.equal((await request('/monitor/summary', null, 'GET', undefined, headers)).status, 401);
+  account.passwordHash = passwordHash;
+  adminCredentials = [];
+  assert.equal((await request('/management/me', null, 'GET', undefined, headers)).status, 401);
+});
+
+test('a saved administrator password takes precedence over old environment credentials and headers', async () => {
+  const { hashAdminPassword } = require('../src/utils/adminAccounts');
+  const oldSession = monitorAuth.createAdminSession();
+  adminCredentials.push({ username: 'fixture-admin', userId: 'admin', passwordHash: await hashAdminPassword('changed') });
+  assert.equal((await request('/management/me', null, 'GET', undefined, { 'X-Monitor-Session': oldSession.token })).status, 401);
+  assert.equal((await request('/management/login', null, 'POST', { user: 'fixture-admin', password: 'fixture-password' })).status, 401);
+  assert.equal((await request('/monitor/summary', null, 'GET', undefined,
+    { 'X-Monitor-User': 'fixture-admin', 'X-Monitor-Password': 'fixture-password' })).status, 401);
+  assert.equal((await request('/management/login', null, 'POST', { user: 'fixture-admin', password: 'changed' })).status, 200);
+});
+
+test('schema rollout preserves environment login and database outages return a recoverable server error', async () => {
+  credentialError = { code: 'P2021' };
+  assert.equal((await request('/management/login', null, 'POST', { user: 'fixture-admin', password: 'fixture-password' })).status, 200);
+  credentialError = { code: 'P1001', message: 'private connection details' };
+  const result = await request('/management/login', null, 'POST', { user: 'administrador', password: '123' });
+  assert.equal(result.status, 503);
+  assert.ok(!JSON.stringify(result.data).includes('private connection details'));
+});
+
+test('database admin sessions work with the existing Clerk secret when no environment admin is configured', () => {
+  const result = require('child_process').spawnSync(process.execPath, ['-e', `
+    const assert = require('node:assert/strict');
+    const auth = require('./src/utils/monitorAdmin');
+    const identity = { adminUsername: 'administrador', passwordVersion: 'a'.repeat(64) };
+    const session = auth.createAdminSession(Date.now(), identity);
+    assert.equal(auth.validAdminSession(session.token), true);
+    assert.equal(auth.validAdminSession(auth.createAdminSession().token), false);
+  `], { cwd: require('path').join(__dirname, '..'), env: { ...process.env,
+    MONITOR_ADMIN_USER: '', MONITOR_ADMIN_PASSWORD: '', MANAGEMENT_SESSION_SECRET: '', CLERK_SECRET_KEY: 'fixture-existing-clerk-key' }, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('malformed or oversized passwords cannot be used for database authentication', async () => {
+  const { verifyAdminPassword, authenticateAdmin } = require('../src/utils/adminAccounts');
+  assert.equal(await verifyAdminPassword('123', 'scrypt$invalid$invalid'), false);
+  assert.equal(await authenticateAdmin('administrador', 'a'.repeat(257), db), null);
+  assert.equal(await authenticateAdmin('administrador', null, db), null);
 });

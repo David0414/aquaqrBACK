@@ -27,11 +27,18 @@ También normaliza los identificadores hexadecimales de hardware a dos caractere
 
 Variables del backend para el acceso administrativo:
 
-- `MONITOR_ADMIN_USER` y `MONITOR_ADMIN_PASSWORD`: usuario y contraseña del
-  administrador, configurados solamente en el backend. No hay credenciales
-  predeterminadas. El formulario valida los datos en `/api/management/login`
+- El acceso por usuario puede guardarse en Supabase mediante la tabla privada
+  `AdminCredential`, vinculada a un usuario con rol `ADMIN`. La contraseña se
+  guarda como un hash con sal; la tabla no es accesible desde los roles del navegador.
+  El formulario valida los datos en `/api/management/login`
   y recibe una sesión firmada que vence a las ocho horas. El navegador conserva
   el token en `sessionStorage`; no guarda la contraseña. Al cerrar sesión lo elimina.
+- `MONITOR_ADMIN_USER` y `MONITOR_ADMIN_PASSWORD`: permiten conservar el acceso
+  configurado en el servidor. Si el mismo usuario tiene credenciales en Supabase,
+  prevalece la contraseña de Supabase.
+- `MANAGEMENT_SESSION_SECRET` (opcional): secreto para firmar las sesiones. Si no
+  está configurado, se utilizan las credenciales administrativas del servidor o
+  `CLERK_SECRET_KEY`, que ya necesita el backend. Debe ser igual en todas las instancias.
 - `ADMIN_CLERK_USER_IDS` (opcional): IDs de Clerk separados por comas para cuentas
   que deben ser administradoras. Esas cuentas pueden entrar con el acceso habitual.
 - `CLERK_SECRET_KEY`: necesaria para verificar la identidad de la cuenta del socio
@@ -57,13 +64,29 @@ template JWT `aquaqr-api` que ya utilizaba la aplicación.
 
 ## Configurar el primer administrador
 
-Configurar `MONITOR_ADMIN_USER` y `MONITOR_ADMIN_PASSWORD` en las variables del
-servidor y reiniciar el backend. El acceso por usuario y contraseña no necesita
-crear un usuario administrador en Supabase ni registrar un correo en Clerk.
-La migración de socios y propietarios descrita arriba sí debe estar aplicada.
+Para el acceso solicitado **administrador / 123** en la aplicación publicada:
 
-No hay cambios adicionales de esquema para separar los accesos. Las cuentas nuevas
-continúan siendo clientes; solo un administrador puede habilitarlas como socios.
+1. En Supabase, abrir **SQL Editor → New query**, pegar todo
+   [CREAR_ADMIN_SUPABASE.sql](CREAR_ADMIN_SUPABASE.sql) y ejecutar **Run**.
+   El archivo crea la tabla de credenciales y el administrador; al ejecutarlo de
+   nuevo restablece la contraseña. La migración previa de roles y socios debe estar aplicada.
+2. Hacer push de estos cambios del backend a Railway. Usar `npm run build` en
+   la compilación y `npm start` para iniciar: el nuevo script `build` genera el
+   cliente de Prisma. El backend debe apuntar al mismo
+   proyecto de Supabase donde se ejecutó el SQL. Cambiar el `.env` local no modifica
+   las variables del servidor publicado.
+3. En la app, pulsar **Entrar como socio o administrador → Administrador** y
+   entrar con usuario **administrador** y contraseña **123**. Abre `/water-monitor`.
+
+Esta cuenta es de la aplicación; no se crea en **Supabase Authentication** ni
+necesita correo o una cuenta de Clerk. Los perfiles de clientes no contienen
+contraseñas. Los cambios de contraseña, suspensión, eliminación o rol se comprueban
+en cada petición y revocan las sesiones de la cuenta afectada.
+
+La migración de esquema es `20261006130000_add_admin_credentials`; no contiene
+cuentas predeterminadas. El SQL anterior crea específicamente la cuenta solicitada.
+Las cuentas nuevas continúan siendo clientes; solo un administrador puede
+habilitarlas como socios.
 
 Un socio puede tener varias máquinas; cada máquina tiene un solo socio responsable.
 El administrador puede transferir la máquina, retirar su asignación y suspender o

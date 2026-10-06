@@ -16,37 +16,66 @@ function validAdminCredentials(user, password) {
 }
 
 function sessionSignature(payload) {
-  return crypto.createHmac('sha256', `${MONITOR_ADMIN_USER}:${MONITOR_ADMIN_PASSWORD}`).update(payload).digest('base64url');
+  const key = process.env.MANAGEMENT_SESSION_SECRET ||
+    (MONITOR_ADMIN_USER && MONITOR_ADMIN_PASSWORD ? `${MONITOR_ADMIN_USER}:${MONITOR_ADMIN_PASSWORD}` : process.env.CLERK_SECRET_KEY);
+  if (!key) throw new Error('Acceso de administrador no configurado');
+  return crypto.createHmac('sha256', key).update(payload).digest('base64url');
 }
 
-function createAdminSession(now = Date.now()) {
-  if (!MONITOR_ADMIN_USER || !MONITOR_ADMIN_PASSWORD) throw new Error('Acceso de administrador no configurado');
+function createAdminSession(now = Date.now(), identity = {}) {
   const expiresAt = now + 8 * 60 * 60 * 1000;
-  const payload = Buffer.from(JSON.stringify({ expiresAt, nonce: crypto.randomBytes(16).toString('hex') })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({ ...identity, expiresAt, nonce: crypto.randomBytes(16).toString('hex') })).toString('base64url');
   return { token: `${payload}.${sessionSignature(payload)}`, expiresAt };
 }
 
-function validAdminSession(token, now = Date.now()) {
-  if (!MONITOR_ADMIN_USER || !MONITOR_ADMIN_PASSWORD || typeof token !== 'string' || token.length > 1000) return false;
+function readAdminSession(token, now = Date.now()) {
+  if (typeof token !== 'string' || token.length > 1000) return null;
   try {
     const [payload, signature, extra] = token.split('.');
-    if (extra || !matchesCredential(signature, sessionSignature(payload))) return false;
-    return Number(JSON.parse(Buffer.from(payload, 'base64url').toString()).expiresAt) > now;
-  } catch { return false; }
+    if (extra || !matchesCredential(signature, sessionSignature(payload))) return null;
+    const session = JSON.parse(Buffer.from(payload, 'base64url').toString());
+    if (!Number.isFinite(session.expiresAt) || session.expiresAt <= now) return null;
+    if (session.adminUsername !== undefined || session.passwordVersion !== undefined) {
+      if (typeof session.adminUsername !== 'string' || !session.adminUsername || session.adminUsername.length > 100 ||
+          typeof session.passwordVersion !== 'string' || !/^[a-f0-9]{64}$/.test(session.passwordVersion)) return null;
+    } else if (!MONITOR_ADMIN_USER || !MONITOR_ADMIN_PASSWORD) return null;
+    return session;
+  } catch { return null; }
 }
 
-function isMonitorAdminRequest(req) {
-  if (validAdminSession(req.headers['x-monitor-session'])) return true;
-  const user = String(req.headers['x-monitor-user'] || '').trim();
-  const password = String(req.headers['x-monitor-password'] || '');
-  return validAdminCredentials(user, password);
+function validAdminSession(token, now = Date.now()) {
+  return Boolean(readAdminSession(token, now));
 }
 
-function requireAuthOrMonitorAdmin(req, res, next) {
+async function monitorAdminIdentity(req) {
+  const session = readAdminSession(req.headers['x-monitor-session']);
+  if (session?.adminUsername) return require('./adminAccounts').resolveAdminSession(session);
+  if (session) {
+    const savedAccount = await require('./adminAccounts').findAdminAccount(MONITOR_ADMIN_USER);
+    return savedAccount ? null : 'agua24-monitor-admin';
+  }
+  if (req.headers['x-monitor-user']) {
+    const identity = await require('./adminAccounts').authenticateAdmin(
+      String(req.headers['x-monitor-user']).trim(), String(req.headers['x-monitor-password'] || ''));
+    if (identity) return identity.adminUsername ? require('./adminAccounts').resolveAdminSession(identity) : 'agua24-monitor-admin';
+  }
+  return null;
+}
+
+async function isMonitorAdminRequest(req) {
+  return Boolean(await monitorAdminIdentity(req));
+}
+
+async function requireAuthOrMonitorAdmin(req, res, next) {
   if (req.headers.authorization) return requireAuth(req, res, next);
-  if (isMonitorAdminRequest(req)) {
-    req.auth = { userId: 'agua24-monitor-admin', monitorAdmin: true };
-    return next();
+  try {
+    const userId = await monitorAdminIdentity(req);
+    if (userId) {
+      req.auth = { userId, monitorAdmin: true };
+      return next();
+    }
+  } catch {
+    return res.status(503).json({ error: 'No se pudo verificar el acceso. Intenta nuevamente.' });
   }
 
   return requireAuth(req, res, next);
