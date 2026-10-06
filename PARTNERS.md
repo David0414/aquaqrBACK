@@ -6,7 +6,7 @@ Clerk, y abre `/water-monitor`. El socio entra con su **correo** mediante Clerk
 y abre `/partner-panel`; el cliente usa su cuenta habitual y abre
 `/home-dashboard`. El botón inferior **Entrar como socio o administrador** abre
 un acceso con dos opciones: **Socio** y **Administrador**. Los accesos
-directos a otros paneles redirigen al panel de la cuenta. Cada socio administra las
+verifican el rol de la cuenta antes de abrir el panel. Cada socio administra las
 máquinas que tiene asignadas. Una cuenta de cliente no tiene permisos de gestión.
 Las comprobaciones de rol, suspensión y propiedad se hacen en el backend en cada
 petición; cambiar una URL o enviar otro hardware no concede acceso.
@@ -57,7 +57,13 @@ template JWT `aquaqr-api` que ya utilizaba la aplicación.
    **Guardar asignación**. Si la máquina solo se detectó por un sticker, primero
    debe registrarla en **Máquinas** con su identificador de hardware.
 5. El socio pulsa **Entrar como socio o administrador**, debajo del acceso habitual,
-   elige **Socio** e inicia sesión con su correo. La aplicación abre su panel.
+   elige **Socio** e inicia sesión con su correo o Google en `/partner-login`.
+   Google debe usar la misma cuenta habilitada por el administrador. Una cuenta
+   que ya era cliente puede habilitarse como socio sin crear otra cuenta ni cambiar
+   de método de inicio de sesión. La aplicación consulta el rol guardado y abre su panel.
+   Si todavía es cliente, muestra el correo y explica que falta habilitar el acceso;
+   permite verificar de nuevo después de que el administrador lo habilite o entrar
+   con otra cuenta. Ir al panel de cliente requiere pulsar **Continuar como cliente**.
    Para entrar como administrador, elegir **Administrador** e ingresar el usuario
    y la contraseña configurados en el backend. El acceso habitual
    también dirige cada cuenta al panel que corresponde a su rol.

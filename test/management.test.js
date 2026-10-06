@@ -165,6 +165,25 @@ test('admin grants an existing verified account access, assigns a machine and th
   assert.deepEqual((await request('/monitor/machines', 'user_newpartner')).data.items.map((machine) => machine.id), ['AQ-003']);
 });
 
+test('an existing Google customer becomes a partner on the same account only after an admin grants access', async () => {
+  const id = 'user_existingGoogle';
+  const email = 'existing@example.com';
+  users.push({ id, role: 'CUSTOMER', managementAccessActive: true });
+  clerkAccounts = [{ id, firstName: 'Socio', primaryEmailAddressId: 'email_google',
+    emailAddresses: [{ id: 'email_google', emailAddress: email, verification: { status: 'verified' } }],
+    externalAccounts: [{ provider: 'oauth_google', emailAddress: email }] }];
+  assert.equal((await request('/management/me', id)).data.role, 'CUSTOMER');
+  assert.equal((await request('/management/partners', id, 'POST', { email })).status, 403);
+  assert.equal((await request('/management/me', id)).data.role, 'CUSTOMER');
+  assert.equal((await request('/management/partners', 'admin', 'POST', { email })).status, 200);
+  const access = (await request('/management/me', id)).data;
+  assert.equal(access.role, 'PARTNER');
+  assert.equal(access.defaultPath, '/partner-panel');
+  assert.equal(users.filter((user) => user.id === id).length, 1);
+  assert.equal((await request('/management/machines/AQ-001/partner', 'admin', 'PUT', { partnerId: id })).status, 200);
+  assert.deepEqual((await request('/monitor/machines', id)).data.items.map((machine) => machine.id), ['AQ-001']);
+});
+
 test('partner can edit prices and machine details, but cannot reassign, rewire, create or delete machines', async () => {
   assert.equal((await request('/monitor/machines/AQ-002', 'partner-1', 'PUT', { name: 'Other' })).status, 404);
   assert.equal((await request('/monitor/machines/AQ-001', 'partner-1', 'PUT', { name: 'Mi sucursal', pricePerGarrafon: '50' })).status, 200);
