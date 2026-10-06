@@ -4,6 +4,7 @@ const router = express.Router();
 const { prisma } = require('../db');   // 👈 usa el singleton
 const { requireAuth } = require('../utils/auth');
 const { getRechargeHistoryItems } = require('../utils/rechargeHistory');
+const { membershipHistoryItem } = require('../utils/membershipHistory');
 function mapDispenseStatus(s) {
   switch (s) {
     case 'COMPLETED': return 'completed';
@@ -27,15 +28,18 @@ router.get('/history', requireAuth, async (req, res) => {
       take: limit
     });
 
-    const [recharges, dispenses] = await Promise.all([rechargesPromise, dispensesPromise]);
+    const membershipsPromise = prisma.userMembership.findMany({ where: { userId }, orderBy: { startsAt: 'desc' }, take: limit });
+    const [recharges, dispenses, memberships] = await Promise.all([rechargesPromise, dispensesPromise, membershipsPromise]);
 
     const items = [
       ...recharges,
+      ...memberships.map(membershipHistoryItem),
       ...dispenses.map(d => ({
         id: d.id,
         type: 'dispensing',
         description: d.description || 'Dispensado de agua',
-        amount: ((d.amountCents ?? d.totalCents) || 0) / 100,
+        amount: Math.max(0, Number(d.amountCents ?? d.totalCents ?? 0) - Number(d.membershipCoveredCents || 0)) / 100,
+        membershipCoveredLiters: Number(d.membershipCoveredLiters || 0),
         currency: (d.currency || 'MXN').toUpperCase(),
         date: d.createdAt,
         status: mapDispenseStatus(d.status),

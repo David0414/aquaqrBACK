@@ -124,6 +124,8 @@ model Dispense {
   liters             Float
   pricePerLiterCents Int
   totalCents         Int
+  membershipCoveredLiters Float @default(0)
+  membershipCoveredCents Int @default(0)
   currency           String
   status             DispenseStatus @default(COMPLETED)
   machineId          String?
@@ -195,6 +197,7 @@ model Machine {
   pricePerGarrafonCents Int      @default(3500)
   status                String   @default("ONLINE")
   isActive              Boolean  @default(true)
+  coinsEnabled          Boolean  @default(false)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 
@@ -239,6 +242,8 @@ model UserMembership {
   id                    String   @id @default(cuid())
   userId                String
   promotionKey          String
+  machineId             String?
+  purchaseKey           String? @unique
   garrafonesTotal       Float
   garrafonesRemaining   Float
   litersTotal           Float
@@ -246,7 +251,7 @@ model UserMembership {
   pricePaidCents        Int
   pricePerGarrafonCents Int
   startsAt              DateTime @default(now())
-  expiresAt             DateTime
+  expiresAt             DateTime?
   status                String   @default("ACTIVE")
   metadata              Json?
   createdAt             DateTime @default(now())
@@ -255,6 +260,7 @@ model UserMembership {
 
   @@index([userId, expiresAt])
   @@index([promotionKey, status])
+  @@index([userId, machineId, status])
 }
 
 model UserPromotionSelection {

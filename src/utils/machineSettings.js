@@ -34,6 +34,11 @@ function buildMachineSettings(body, existing, principal) {
     if (typeof body.isActive !== 'boolean') throw error('Estado de activación inválido');
     data.isActive = body.isActive;
   }
+  if (body.coinsEnabled !== undefined) {
+    if (principal.role !== 'ADMIN') throw error('Solo el administrador puede habilitar monedas', 403);
+    if (typeof body.coinsEnabled !== 'boolean') throw error('Indica si las monedas deben estar habilitadas');
+    data.coinsEnabled = body.coinsEnabled;
+  }
   return data;
 }
 

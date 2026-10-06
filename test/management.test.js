@@ -36,6 +36,7 @@ const db = {
   },
   dispense: { aggregate: async ({ where }) => ({ _count: { _all: where.machineId.in.length },
     _sum: { liters: where.machineId.in.length * 20, totalCents: where.machineId.in.length * 3500 } }) },
+  userMembership: { aggregate: async () => ({ _count: { _all: 0 }, _sum: { pricePaidCents: 0 } }) },
   appPromotion: { upsert: async ({ create }) => create, findMany: async () => [] },
   $transaction: async (run) => run(db),
 };

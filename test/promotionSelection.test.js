@@ -16,7 +16,7 @@ test('rejects two benefits before changing any saved selection', async () => {
 test('saves one promotion and replaces the previous selection', async () => {
   const calls = [];
   const client = {
-    $transaction: async (run) => run({ userPromotionSelection: {
+    $transaction: async (run) => run({ userMembership: { findFirst: async () => null }, userPromotionSelection: {
       deleteMany: async (args) => calls.push(['delete', args]),
       createMany: async (args) => calls.push(['create', args]),
     } }),
@@ -32,7 +32,7 @@ test('saves one promotion and replaces the previous selection', async () => {
 
 test('reports one available slot and asks existing two-benefit selections to be updated', async () => {
   for (const keys of [[], ['topup_bonus'], ['topup_bonus', 'monthly_cashback']]) {
-    const client = { userPromotionSelection: { findMany: async () => keys.map((promotionKey) => ({ promotionKey })) } };
+    const client = { userPromotionSelection: { findMany: async () => keys.map((promotionKey) => ({ promotionKey, monthKey: '2026-10' })) } };
     const state = await getUserPromotionSelectionState(client, 'user-1', now, promotions);
     assert.equal(state.requiredCount, 1);
     assert.equal(state.complete, keys.length === 1);

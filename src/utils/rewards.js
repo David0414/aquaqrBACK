@@ -90,8 +90,8 @@ const DEFAULT_PROMOTIONS = Object.freeze([
   {
     key: PROMOTION_KEYS.MEMBERSHIP_1,
     title: 'Membresia premium 1',
-    summary: '5 garrafones al mes por $95',
-    description: 'Plan mensual de un solo pago: 5 garrafones al mes por $95. Costo por garrafon: $19.',
+    summary: '5 garrafones con descuento, hasta agotarlos',
+    description: 'Un pago incluye 5 garrafones. Precio ajustado a la máquina; puedes usarlos hasta agotarlos.',
     kind: 'membership',
     sortOrder: 5,
     isActive: true,
@@ -104,8 +104,8 @@ const DEFAULT_PROMOTIONS = Object.freeze([
   {
     key: PROMOTION_KEYS.MEMBERSHIP_2,
     title: 'Membresia premium 2',
-    summary: '8 garrafones al mes por $148',
-    description: 'Plan mensual de un solo pago: 8 garrafones al mes por $148. Costo por garrafon: $18.50.',
+    summary: '8 garrafones con descuento, hasta agotarlos',
+    description: 'Un pago incluye 8 garrafones. Precio ajustado a la máquina; puedes usarlos hasta agotarlos.',
     kind: 'membership',
     sortOrder: 6,
     isActive: true,
@@ -118,8 +118,8 @@ const DEFAULT_PROMOTIONS = Object.freeze([
   {
     key: PROMOTION_KEYS.MEMBERSHIP_3,
     title: 'Membresia premium 3',
-    summary: '11 garrafones al mes por $198',
-    description: 'Plan mensual de un solo pago: 11 garrafones al mes por $198. Costo por garrafon: $18.',
+    summary: '11 garrafones con descuento, hasta agotarlos',
+    description: 'Un pago incluye 11 garrafones. Precio ajustado a la máquina; puedes usarlos hasta agotarlos.',
     kind: 'membership',
     sortOrder: 7,
     isActive: true,
@@ -155,15 +155,7 @@ async function ensurePromotionCatalog(client = prisma) {
   for (const promotion of DEFAULT_PROMOTIONS) {
     await client.appPromotion.upsert({
       where: { key: promotion.key },
-      update: {
-        title: promotion.title,
-        summary: promotion.summary,
-        description: promotion.description,
-        kind: promotion.kind,
-        sortOrder: promotion.sortOrder,
-        isActive: promotion.isActive,
-        config: promotion.config,
-      },
+      update: {},
       create: promotion,
     });
   }
@@ -342,10 +334,15 @@ async function saveUserPromotionSelections(client, userId, promotionKeys, now = 
     throw new Error('Solo puedes elegir una membresia a la vez');
   }
 
-  const expiresAt = addDays(now, PROMOTION_SELECTION_DAYS);
+  const expiresAt = selectedMemberships.length ? null : addDays(now, PROMOTION_SELECTION_DAYS);
 
   try {
     await client.$transaction(async (tx) => {
+      const paidMembership = await tx.userMembership.findFirst({ where: { userId, status: 'ACTIVE', litersRemaining: { gt: 0 },
+        OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] } });
+      if (paidMembership && !uniqueKeys.includes(paidMembership.promotionKey)) {
+        throw new Error('Usa los litros de tu membresía antes de elegir otra promoción. Al agotarlos podrás cambiar.');
+      }
       await tx.userPromotionSelection.deleteMany({
         where: {
           userId,
@@ -367,7 +364,7 @@ async function saveUserPromotionSelections(client, userId, promotionKeys, now = 
           })),
         });
       }
-    });
+    }, { isolationLevel: 'Serializable' });
   } catch (error) {
     if (isMissingSelectionTableError(error)) {
       throw new Error('La base de datos aun no tiene habilitada la seleccion mensual de promociones');
@@ -380,7 +377,7 @@ async function saveUserPromotionSelections(client, userId, promotionKeys, now = 
     promotionKeys: uniqueKeys,
     requiredCount: maxCount,
     expiresAt,
-    durationDays: PROMOTION_SELECTION_DAYS,
+    durationDays: selectedMemberships.length ? null : PROMOTION_SELECTION_DAYS,
   };
 }
 
@@ -390,23 +387,31 @@ async function getUserPromotionSelectionState(client, userId, now = new Date(), 
   const selectablePromotions = getMonthlySelectablePromotions(resolvedPromotions);
   const requiredCount = Math.min(1, selectablePromotions.length);
   const selectableKeys = new Set(selectablePromotions.map((promotion) => promotion.key));
-  const selections = await getUserPromotionSelections(client, userId, selectionMonthKey, { now, activeOnly: true });
+  const activeSelections = await getUserPromotionSelections(client, userId, null, { now, activeOnly: true });
+  const selections = activeSelections.filter((row) => row.monthKey === selectionMonthKey
+    || getPromotionByKey(resolvedPromotions, row.promotionKey)?.kind === 'membership');
   const selectedPromotionKeys = selections
     .map((row) => row.promotionKey)
-    .filter((key) => selectableKeys.has(key));
+    .filter((key) => selectableKeys.has(key) || getPromotionByKey(resolvedPromotions, key)?.kind === 'membership');
   const expiresAt = selections
     .map((row) => row.expiresAt)
     .filter(Boolean)
     .sort((a, b) => new Date(a) - new Date(b))[0] || null;
+  const membershipKeys = selectedPromotionKeys.filter((key) => getPromotionByKey(resolvedPromotions, key)?.kind === 'membership');
+  const paidMemberships = membershipKeys.length ? await client.userMembership.findMany({ where: { userId,
+    promotionKey: { in: membershipKeys }, status: 'ACTIVE', litersRemaining: { gt: 0 },
+    OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] } }) : [];
+  const activePromotionKeys = selectedPromotionKeys.filter((key) => !membershipKeys.includes(key) || paidMemberships.some((row) => row.promotionKey === key));
 
   return {
     month: selectionMonthKey,
     requiredCount,
     selectedPromotionKeys,
-    complete: requiredCount === 0 ? true : selectedPromotionKeys.length > 0 && selectedPromotionKeys.length <= requiredCount,
+    activePromotionKeys,
+    complete: requiredCount === 0 ? true : activePromotionKeys.length > 0 && activePromotionKeys.length <= requiredCount,
     selectablePromotions,
     expiresAt,
-    durationDays: PROMOTION_SELECTION_DAYS,
+    durationDays: membershipKeys.length ? null : PROMOTION_SELECTION_DAYS,
   };
 }
 

@@ -7,6 +7,7 @@ const { signMachineLink } = require('../utils/qrSigning');
 const { requireManagement, requireAdministrator, requireManagedMachine, machineScope, sendAccessError } = require('../utils/managementAccess');
 const { saveManagedMachine } = require('../utils/machineSettings');
 const { getPromotionCatalog, ensurePromotionCatalog } = require('../utils/rewards');
+const { machineSales } = require('../utils/machineSales');
 
 const router = express.Router();
 
@@ -255,15 +256,14 @@ router.get('/summary', requireManagement, async (req, res) => {
     ]);
     const machines = req.management.role === 'ADMIN' ? mergeMachines(dbMachines) : dbMachines;
     const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const sales = await prisma.dispense.aggregate({ where: { machineId: { in: dbMachines.map((machine) => machine.id) },
-      status: 'COMPLETED', createdAt: { gte: since } }, _sum: { liters: true, totalCents: true }, _count: { _all: true } });
+    const sales = await machineSales(prisma, dbMachines.map((machine) => machine.id), since);
 
     return res.json({
       machines,
       role: req.management.role,
       name: req.management.name || null,
       promotions,
-      sales: { periodDays: 30, transactions: sales._count._all, liters: sales._sum.liters || 0, revenueCents: sales._sum.totalCents || 0 },
+      sales,
       counts: {
         machines: machines.length,
         activeMachines: machines.filter((machine) => machine.isActive).length,

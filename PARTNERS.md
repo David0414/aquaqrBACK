@@ -82,6 +82,10 @@ en lugar de confiar en el que envíe el navegador.
 
 ## Verificación
 
+Los cambios de membresías por consumo y control de monedas requieren otra
+actualización en Supabase. Consulta [MEMBERSHIPS.md](MEMBERSHIPS.md) para pegar
+el SQL y configurar cada máquina.
+
 ```powershell
 node --test
 ```

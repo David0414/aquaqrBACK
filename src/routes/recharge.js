@@ -10,6 +10,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
 
 const { requireAuth } = require('../utils/auth');
 const { getRechargeHistoryItems } = require('../utils/rechargeHistory');
+const { requireMachineCoins, requireCoinSession } = require('../utils/machineCoins');
 const {
   getPromotionCatalog,
   applyRewardCreditTx,
@@ -439,6 +440,8 @@ router.post('/telemetry-credit/reset', requireAuth, async (req, res) => {
   try {
     const { userId, email, name } = req.auth;
     const machineId = normalizeMachineId(req.body?.machineId);
+    const coinMachine = await requireMachineCoins(machineId, req.body?.hardwareId);
+    await requireCoinSession(userId, coinMachine);
 
     await ensureUserAndWallet({ userId, email, name });
 
@@ -469,7 +472,7 @@ router.post('/telemetry-credit/reset', requireAuth, async (req, res) => {
     });
   } catch (e) {
     console.error('POST /api/recharge/telemetry-credit/reset error', e);
-    return res.status(500).json({ error: 'No se pudo reiniciar el checkpoint de monedas' });
+    return res.status(e.statusCode || 500).json({ error: e.code || 'No se pudo reiniciar el checkpoint de monedas', message: e.statusCode ? e.message : undefined });
   }
 });
 
@@ -483,6 +486,8 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
   try {
     const { userId, email, name } = req.auth;
     const machineId = normalizeMachineId(req.body?.machineId);
+    const coinMachine = await requireMachineCoins(machineId, req.body?.hardwareId);
+    await requireCoinSession(userId, coinMachine);
     const insertedAmount = Number.parseInt(req.body?.insertedAmount, 10);
     const accumulatedAmount = Number.parseInt(req.body?.accumulatedAmount, 10);
     const pulseCount = Number.parseInt(req.body?.pulseCount, 10);
@@ -679,7 +684,7 @@ router.post('/telemetry-credit', requireAuth, async (req, res) => {
     return res.json(result);
   } catch (e) {
     console.error('POST /api/recharge/telemetry-credit error', e);
-    return res.status(500).json({ error: 'No se pudo acreditar la recarga por telemetria' });
+    return res.status(e.statusCode || 500).json({ error: e.code || 'No se pudo acreditar la recarga por telemetria', message: e.statusCode ? e.message : undefined });
   }
 });
 

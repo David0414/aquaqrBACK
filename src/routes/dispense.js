@@ -8,6 +8,9 @@ const { requireAuth } = require('../utils/auth');
 const { requireAuthOrMonitorAdmin } = require('../utils/monitorAdmin');
 const { getManagementPrincipal, getManagedMachine, requireManagedMachine, sendAccessError } = require('../utils/managementAccess');
 const { sendUserNotification } = require('../utils/notifications');
+const { requireMachineCoins } = require('../utils/machineCoins');
+const { membershipCoverage } = require('../utils/memberships');
+const { chargeDispenseTx } = require('../utils/dispenseCharge');
 
 /* ----------------------------------------------------------------------------- */
 /* Config desde .env                                                             */
@@ -131,13 +134,16 @@ async function debitWalletBalanceTx(tx, userId, totalCents) {
 
   const bonusDebitedCents = Math.min(Number(wallet.bonusBalanceCents || 0), totalCents);
   const realDebitedCents = totalCents - bonusDebitedCents;
-  const updatedWallet = await tx.wallet.update({
-    where: { userId },
+  const updated = await tx.wallet.updateMany({
+    where: { userId, balanceCents: { gte: realDebitedCents }, bonusBalanceCents: { gte: bonusDebitedCents } },
     data: {
       balanceCents: { decrement: realDebitedCents },
       bonusBalanceCents: { decrement: bonusDebitedCents },
     },
   });
+
+  if (updated.count !== 1) throw Object.assign(new Error('Tu saldo cambió. Intenta nuevamente.'), { statusCode: 409 });
+  const updatedWallet = await tx.wallet.findUnique({ where: { userId } });
 
   return {
     updatedWallet,
@@ -147,157 +153,8 @@ async function debitWalletBalanceTx(tx, userId, totalCents) {
   };
 }
 
-async function getAvailableMembershipCoverage(userId, liters, client = prisma) {
-  const memberships = await client.userMembership.findMany({
-    where: {
-      userId,
-      status: 'ACTIVE',
-      expiresAt: { gt: new Date() },
-      litersRemaining: { gt: 0 },
-    },
-    orderBy: { expiresAt: 'asc' },
-  });
-
-  let remainingLiters = Math.max(0, Number(liters || 0));
-  let coveredLiters = 0;
-
-  for (const membership of memberships) {
-    if (remainingLiters <= 0) break;
-    const availableLiters = Math.max(0, Number(membership.litersRemaining || 0));
-    const usedLiters = Math.min(remainingLiters, availableLiters);
-    coveredLiters += usedLiters;
-    remainingLiters -= usedLiters;
-  }
-
-  return {
-    coveredLiters,
-    remainingLiters,
-    hasCoverage: coveredLiters > 0,
-  };
-}
-
-async function consumeMembershipForDispenseTx(tx, userId, liters) {
-  const memberships = await tx.userMembership.findMany({
-    where: {
-      userId,
-      status: 'ACTIVE',
-      expiresAt: { gt: new Date() },
-      litersRemaining: { gt: 0 },
-    },
-    orderBy: { expiresAt: 'asc' },
-  });
-
-  let remainingLiters = Math.max(0, Number(liters || 0));
-  let coveredLiters = 0;
-  const consumedMembershipIds = [];
-
-  for (const membership of memberships) {
-    if (remainingLiters <= 0) break;
-
-    const availableLiters = Math.max(0, Number(membership.litersRemaining || 0));
-    const usedLiters = Math.min(remainingLiters, availableLiters);
-    const nextLitersRemaining = Math.max(0, availableLiters - usedLiters);
-
-    if (usedLiters <= 0) continue;
-
-    await tx.userMembership.update({
-      where: { id: membership.id },
-      data: {
-        litersRemaining: nextLitersRemaining,
-        garrafonesRemaining: Math.max(0, nextLitersRemaining / GARRAFON_LITERS),
-        status: nextLitersRemaining <= 0.001 ? 'USED' : 'ACTIVE',
-      },
-    });
-
-    consumedMembershipIds.push(membership.id);
-    coveredLiters += usedLiters;
-    remainingLiters -= usedLiters;
-  }
-
-  return {
-    coveredLiters,
-    remainingLiters,
-    consumedMembershipIds,
-  };
-}
-
-function payableCentsAfterMembership(totalCents, membershipCoverage, pricePerLiterCents) {
-  const coveredCents = Math.min(
-    Number(totalCents || 0),
-    Math.round(Number(membershipCoverage?.coveredLiters || 0) * Number(pricePerLiterCents || 0))
-  );
-
-  return {
-    coveredCents,
-    payableCents: Math.max(0, Number(totalCents || 0) - coveredCents),
-  };
-}
-
 async function chargeDispenseIfMissingTx(tx, existing) {
-  const externalId = `DISPENSE:${existing.id}`;
-  const postedDebits = await tx.ledgerEntry.findMany({
-    where: {
-      userId: existing.userId,
-      type: 'DEBIT',
-      status: 'POSTED',
-      OR: [
-        { externalId },
-        { source: externalId },
-      ],
-    },
-  });
-  const chargedAlreadyCents = postedDebits.reduce((sum, item) => sum + Number(item.amountCents || 0), 0);
-
-  if (chargedAlreadyCents >= Number(existing.totalCents || 0)) {
-    const wallet = await tx.wallet.findUnique({ where: { userId: existing.userId } });
-    const ledger = postedDebits.find((item) => item.externalId === externalId) || postedDebits[0] || null;
-    return {
-      alreadyCharged: true,
-      updatedWallet: wallet,
-      newBalanceCents: totalAvailableBalanceCents(wallet),
-      newRealBalanceCents: Number(wallet?.balanceCents || 0),
-      newBonusBalanceCents: Number(wallet?.bonusBalanceCents || 0),
-      realDebitedCents: 0,
-      bonusDebitedCents: 0,
-      membershipCoveredLiters: 0,
-      membershipCoveredCents: 0,
-      chargedCents: chargedAlreadyCents,
-      ledgerId: ledger?.id,
-    };
-  }
-
-  const amountToChargeCents = Math.max(0, Number(existing.totalCents || 0) - chargedAlreadyCents);
-  const debitResult = await debitWalletBalanceTx(tx, existing.userId, amountToChargeCents);
-  const updatedWallet = debitResult.updatedWallet;
-
-  const ledger = await tx.ledgerEntry.create({
-    data: {
-      userId: existing.userId,
-      type: 'DEBIT',
-      amountCents: amountToChargeCents,
-      currency: existing.currency,
-      description: `Dispensado de agua - ${existing.liters}L`,
-      source: `DISPENSE:${existing.id}`,
-      externalId: chargedAlreadyCents > 0
-        ? `DISPENSE_ADJUST:${existing.id}:${Date.now()}`
-        : externalId,
-      status: 'POSTED',
-    },
-  });
-
-  return {
-    alreadyCharged: false,
-    updatedWallet,
-    newBalanceCents: totalAvailableBalanceCents(updatedWallet),
-    newRealBalanceCents: Number(updatedWallet.balanceCents || 0),
-    newBonusBalanceCents: Number(updatedWallet.bonusBalanceCents || 0),
-    realDebitedCents: debitResult.realDebitedCents,
-    bonusDebitedCents: debitResult.bonusDebitedCents,
-    membershipCoveredLiters: 0,
-    membershipCoveredCents: 0,
-    chargedCents: chargedAlreadyCents + amountToChargeCents,
-    ledgerId: ledger.id,
-  };
+  return chargeDispenseTx(tx, existing, debitWalletBalanceTx);
 }
 
 function normalizeMachineId(value) {
@@ -1324,17 +1181,20 @@ router.post('/', requireAuth, async (req, res) => {
 
     const walletSnapshot = walletBalanceSnapshot(wallet);
 
-    if (walletSnapshot.balanceCents < totalCents) {
+    const coverage = await membershipCoverage(prisma, userId, ltrs, pricing.machine?.id || safeMachineId);
+    const membershipCoveredCents = Math.min(totalCents, Math.round(coverage.coveredLiters * pricePerLiterCents));
+    const payableCents = Math.max(0, totalCents - membershipCoveredCents);
+    if (walletSnapshot.balanceCents < payableCents) {
       return res.status(400).json({
         error: 'INSUFFICIENT_FUNDS',
-        neededCents: totalCents - walletSnapshot.balanceCents,
+        neededCents: payableCents - walletSnapshot.balanceCents,
         balanceCents: walletSnapshot.balanceCents,
         realBalanceCents: walletSnapshot.realBalanceCents,
         bonusBalanceCents: walletSnapshot.bonusBalanceCents,
         totalCents,
-        payableCents: totalCents,
-        membershipCoveredLiters: 0,
-        membershipCoveredCents: 0,
+        payableCents,
+        membershipCoveredLiters: coverage.coveredLiters,
+        membershipCoveredCents,
       });
     }
 
@@ -1356,7 +1216,7 @@ router.post('/', requireAuth, async (req, res) => {
         totalCents,
         currency: CURRENCY,
         status: 'STARTED',
-        machineId: safeMachineId,
+        machineId: pricing.machine?.id || safeMachineId,
         machineLocation: location || null,
       },
     });
@@ -1377,9 +1237,9 @@ router.post('/', requireAuth, async (req, res) => {
       pricePerGarrafonCents: pricing.pricePerGarrafonCents,
       amountCents: totalCents,
       totalCents,
-      payableCents: totalCents,
-      membershipCoveredLiters: 0,
-      membershipCoveredCents: 0,
+      payableCents,
+      membershipCoveredLiters: coverage.coveredLiters,
+      membershipCoveredCents,
       currency: CURRENCY,
       pulsesPerLiter: safePulsesPerLiter,
       prevBalanceCents: walletSnapshot.balanceCents,
@@ -1436,7 +1296,7 @@ router.post('/complete', requireAuth, async (req, res) => {
         txId: existing.id,
         liters: existing.liters,
         pricePerLiterCents: existing.pricePerLiterCents,
-        amountCents: existing.totalCents,
+        amountCents: result.chargedCents ?? Math.max(0, existing.totalCents - Number(existing.membershipCoveredCents || 0)),
         totalCents: existing.totalCents,
         chargedCents: result.chargedCents ?? existing.totalCents,
         membershipCoveredLiters: result.membershipCoveredLiters || 0,
@@ -1464,7 +1324,8 @@ router.post('/complete', requireAuth, async (req, res) => {
 
       if (claimed.count !== 1) {
         const current = await tx.dispense.findUnique({ where: { id: existing.id } });
-        return { alreadyCompleted: current?.status === 'COMPLETED' };
+        if (current?.status !== 'COMPLETED') throw Object.assign(new Error('El dispensado cambió de estado'), { statusCode: 409 });
+        return { alreadyCompleted: true, ...await chargeDispenseIfMissingTx(tx, current) };
       }
 
       const charge = await chargeDispenseIfMissingTx(tx, existing);
@@ -1497,7 +1358,7 @@ router.post('/complete', requireAuth, async (req, res) => {
       txId: existing.id,
       liters: existing.liters,
       pricePerLiterCents: existing.pricePerLiterCents,
-      amountCents: existing.totalCents,
+      amountCents: result.chargedCents ?? Math.max(0, existing.totalCents - Number(existing.membershipCoveredCents || 0)),
       totalCents: existing.totalCents,
       chargedCents: result.chargedCents ?? existing.totalCents,
       membershipCoveredLiters: result.membershipCoveredLiters || 0,
@@ -1550,7 +1411,8 @@ router.get('/history', requireAuth, async (req, res) => {
       id: d.id,
       type: 'dispensing',
       description: d.description || `Dispensado de agua • ${d.liters}L`,
-      amount: (d.totalCents || 0) / 100,
+      amount: Math.max(0, Number(d.totalCents || 0) - Number(d.membershipCoveredCents || 0)) / 100,
+      membershipCoveredLiters: Number(d.membershipCoveredLiters || 0),
       currency: (d.currency || 'MXN').toUpperCase(),
       date: d.createdAt,
       status: mapDispenseStatus(d.status),
@@ -1592,6 +1454,7 @@ router.get('/config', async (req, res) => {
       machineId: pricing.machine?.id || normalizeMachineId(req.query?.machineId) || null,
       optionsLiters,
       allowedLiters: optionsLiters,
+      coinsEnabled: pricing.machine?.coinsEnabled === true,
     });
   } catch (e) {
     console.error('GET /api/dispense/config error', e);
@@ -1779,6 +1642,19 @@ router.post('/active/cancel', requireAuth, async (req, res) => {
 /* ----------------------------------------------------------------------------- */
 /* GET /api/dispense/quote?liters=10  (pública)                                  */
 /* ----------------------------------------------------------------------------- */
+router.get('/coverage', requireAuth, async (req, res) => {
+  try {
+    const liters = Number(req.query.liters);
+    if (!ALLOWED_LITERS.has(liters)) return res.status(400).json({ error: 'Litros inválidos' });
+    const pricing = await getMachinePricing(req.query.machineId, req.query.hardwareId);
+    const totalCents = totalForLiters(liters, pricing.pricePerLiterCents);
+    const coverage = await membershipCoverage(prisma, req.auth.userId, liters, pricing.machine?.id || normalizeMachineId(req.query.machineId));
+    const membershipCoveredCents = Math.min(totalCents, Math.round(coverage.coveredLiters * pricing.pricePerLiterCents));
+    return res.json({ liters, totalCents, membershipCoveredLiters: coverage.coveredLiters, membershipCoveredCents,
+      payableCents: totalCents - membershipCoveredCents, pricePerLiterCents: pricing.pricePerLiterCents });
+  } catch (error) { return res.status(error.statusCode || 500).json({ error: error.message || 'No se pudo calcular tu compra' }); }
+});
+
 router.get('/quote', async (req, res) => {
   const ltrs = Number(req.query.liters || 0);
   if (!ALLOWED_LITERS.has(ltrs)) {
@@ -1864,6 +1740,7 @@ router.post('/demo/control', requireAuthOrMonitorAdmin, async (req, res) => {
       });
     }
 
+    if (action === 'recarga_monedas') await requireMachineCoins(machineId, hardwareId);
     const out = await sendDemoAction(action, req.body?.pulsesPerLiter, hardwareId);
     return res.json({ ok: true, ...out });
   } catch (e) {
