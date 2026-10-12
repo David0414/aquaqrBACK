@@ -98,6 +98,26 @@ El nuevo SQL Transparente está preparado para el SQL Editor; no se aplicó a la
 
 ## Recarga de clientes
 
+El botón muestra **Pagar** en ambos entornos. Con una clave `test_`, el aviso
+**Modo de prueba · sin cargos reales** permanece visible: cambiar el texto del
+botón no convierte las credenciales en productivas.
+
+Un pago `approved` verificado suma el importe a **Saldo depositado** y el bono
+correspondiente a **Saldo de promociones**, una sola vez. Al volver a Inicio se
+presenta inmediatamente el saldo confirmado; una consulta anterior todavía en
+curso no puede reemplazarlo por el saldo viejo. Si el webhook confirma primero,
+la respuesta del pago también devuelve la cartera actualizada.
+
+La aprobación recibida en `POST /payments` se valida y se utiliza en esa misma
+solicitud. Los pagos pendientes se siguen verificando con consultas nuevas a
+Clip y se acreditan al aprobarse. Promociones comparte el último resumen de cada
+usuario, actualiza los datos en segundo plano y consulta precios vigentes antes
+de comprar. El catálogo se inicializa una vez por proceso, conservando la lectura
+de los cambios de precios y promociones del administrador.
+
+Esta corrección no añade columnas ni requiere otro SQL. Publicar los cambios de
+Backend en Railway y del frontend en Vercel, incluyendo los archivos nuevos.
+
 La pantalla 1 permite elegir $50, $100, $200, $500 o un monto de $10 a $500.
 La pantalla 2 presenta el saldo a recibir y el formulario protegido de Clip
 dentro de la app. El backend fija el importe y el bono antes de recibir el token.

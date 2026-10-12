@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { transparentConfig, paymentRequest, chargeTransparentPayment, verifiedTransparentStatus, paymentAction } = require('../src/utils/clipTransparent');
-const { settleClipRecharge } = require('../src/utils/clipSettlement');
+const { settleClipRecharge, reconcileClipRecharge } = require('../src/utils/clipSettlement');
 const { settleMachinePremium, PREMIUM_PLANS, activeMachinePremium } = require('../src/utils/machinePremium');
 const { DEFAULT_PROMOTIONS, monthKey } = require('../src/utils/rewards');
 
@@ -94,6 +94,35 @@ test('an uncertain network result locks the attempt and a retry never sends anot
   await chargeTransparentPayment(f.db, 'recharge', payment, token, customer, failed);
   assert.equal(calls, 1); assert.equal(f.rows().recharge[0].status, 'PENDING');
   assert.ok(f.rows().recharge[0].clipChargeStartedAt); assert.equal(f.rows().wallet.length, 0);
+});
+
+test('an approved POST credits immediately from verified provider proof, without a second provider request', async () => {
+  const f = database(), payment = invoice(); f.rows().recharge.push(payment);
+  let calls = 0;
+  const saved = await chargeTransparentPayment(f.db, 'recharge', payment, token, customer, async (url, options) => {
+    calls++; assert.equal(options.method, 'POST'); return response(proof(payment));
+  });
+  const originalFetch = global.fetch;
+  global.fetch = async () => assert.fail('The approved charge already supplied the verified proof');
+  try {
+    const result = await reconcileClipRecharge(f.db, saved);
+    assert.equal(result.status, 'SUCCEEDED'); assert.equal(result.wallet.balanceCents, 10000);
+    assert.equal(result.wallet.bonusBalanceCents, 250); assert.equal(calls, 1);
+  } finally { global.fetch = originalFetch; }
+});
+
+test('a pending POST does not credit and a later status check fetches fresh provider proof', async () => {
+  const f = database(), payment = invoice(); f.rows().recharge.push(payment);
+  const saved = await chargeTransparentPayment(f.db, 'recharge', payment, token, customer,
+    async () => response(proof(payment, 'pending')));
+  assert.equal((await reconcileClipRecharge(f.db, saved)).status, 'PENDING');
+  assert.equal(f.rows().wallet.length, 0);
+  const originalFetch = global.fetch; let reads = 0;
+  global.fetch = async (url, options) => { reads++; assert.equal(options.method, 'GET'); return response(proof(saved)); };
+  try {
+    assert.equal((await reconcileClipRecharge(f.db, saved)).status, 'SUCCEEDED');
+    assert.equal(reads, 1); assert.equal(f.rows().wallet[0].balanceCents, 10000);
+  } finally { global.fetch = originalFetch; }
 });
 
 test('invalid customer information and a changed sandbox environment never initiate a charge', async () => {

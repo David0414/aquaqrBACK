@@ -149,16 +149,24 @@ function addDays(date, days) {
   return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
 }
 
+const catalogInitializations = new WeakMap();
+
 async function ensurePromotionCatalog(client = prisma) {
+  if (catalogInitializations.has(client)) return catalogInitializations.get(client);
+  const initialization = initializePromotionCatalog(client);
+  catalogInitializations.set(client, initialization);
+  try { await initialization; }
+  catch (error) { catalogInitializations.delete(client); throw error; }
+}
+
+async function initializePromotionCatalog(client) {
   const activeKeys = DEFAULT_PROMOTIONS.map((promotion) => promotion.key);
 
-  for (const promotion of DEFAULT_PROMOTIONS) {
-    await client.appPromotion.upsert({
-      where: { key: promotion.key },
-      update: {},
-      create: promotion,
-    });
-  }
+  await Promise.all(DEFAULT_PROMOTIONS.map((promotion) => client.appPromotion.upsert({
+    where: { key: promotion.key },
+    update: {},
+    create: promotion,
+  })));
 
   await client.appPromotion.updateMany({
     where: {

@@ -63,7 +63,11 @@ test('concurrent callback and return reconciliation credit real and promotional 
   const payment = { id: 'recharge_1', userId: 'customer', provider: 'CLIP', status: 'PENDING', amountCents: 10000,
     bonusCents: 250, bonusPromotionKey: 'topup_bonus', bonusMetadata: {}, providerPaymentId };
   const f = database(payment);
-  await Promise.all([settleClipRecharge(f.client, payment, proof(payment)), settleClipRecharge(f.client, payment, proof(payment))]);
+  const results = await Promise.all([settleClipRecharge(f.client, payment, proof(payment)), settleClipRecharge(f.client, payment, proof(payment))]);
+  for (const result of results) {
+    assert.equal(result.wallet.balanceCents, 10000);
+    assert.equal(result.wallet.bonusBalanceCents, 250);
+  }
   assert.equal(f.state().wallet[0].balanceCents, 10000);
   assert.equal(f.state().wallet[0].bonusBalanceCents, 250);
   assert.equal(f.state().recharge[0].status, 'SUCCEEDED');

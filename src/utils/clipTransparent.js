@@ -1,5 +1,7 @@
 const { UUID } = require('./clip');
 const error = (message, statusCode = 502, code = 'CLIP_UNAVAILABLE') => Object.assign(new Error(message), { statusCode, code });
+// Reuse the already verified POST response only within its charge request.
+const chargeProofs = new WeakMap();
 
 function transparentConfig() {
   const apiKey = String(process.env.CLIP_API_KEY || '').trim().replace(/^Bearer\s+/i, '');
@@ -96,7 +98,9 @@ async function chargeTransparentPayment(client, model, payment, cardToken, custo
     verifiedTransparentStatus(payment, data);
     // Save the provider ID before any wallet change. Subsequent attempts only consult this payment.
     await client[model].updateMany({ where: { id: payment.id, providerPaymentId: null }, data: { providerPaymentId: data.id } });
-    return client[model].findUnique({ where: { id: payment.id } });
+    const saved = await client[model].findUnique({ where: { id: payment.id } });
+    if (saved) chargeProofs.set(saved, data);
+    return saved;
   } catch (failure) {
     if (failure.definitiveRejection) await client[model].updateMany({ where: { id: payment.id, status: 'PENDING', providerPaymentId: null }, data: { status: 'FAILED' } });
     throw failure;
@@ -105,6 +109,8 @@ async function chargeTransparentPayment(client, model, payment, cardToken, custo
 
 async function transparentProof(payment, fetcher) {
   assertEnvironment(payment);
+  const proof = chargeProofs.get(payment);
+  if (proof) { chargeProofs.delete(payment); verifiedTransparentStatus(payment, proof); return proof; }
   return paymentRequest('GET', payment.providerPaymentId, null, fetcher);
 }
 

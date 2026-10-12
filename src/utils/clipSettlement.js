@@ -7,7 +7,12 @@ async function settleClipRecharge(client, payment, verified) {
   if (status === 'PENDING') return { status, pendingAction: payment.clipFlow === 'TRANSPARENT' ? paymentAction(verified) : null };
   return client.$transaction(async (tx) => {
     const claimed = await tx.recharge.updateMany({ where: { id: payment.id, provider: 'CLIP', status: 'PENDING' }, data: { status } });
-    if (!claimed.count) return { status: (await tx.recharge.findUnique({ where: { id: payment.id } }))?.status || status };
+    if (!claimed.count) {
+      const saved = await tx.recharge.findUnique({ where: { id: payment.id } });
+      const currentStatus = saved?.status || 'PENDING';
+      return { status: currentStatus, ...(currentStatus === 'SUCCEEDED'
+        ? { wallet: await tx.wallet.findUnique({ where: { userId: payment.userId } }) } : {}) };
+    }
     if (status !== 'SUCCEEDED') return { status };
     await tx.wallet.upsert({ where: { userId: payment.userId }, update: { balanceCents: { increment: payment.amountCents } },
       create: { userId: payment.userId, balanceCents: payment.amountCents, bonusBalanceCents: 0 } });
