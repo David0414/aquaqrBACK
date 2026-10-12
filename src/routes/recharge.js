@@ -365,7 +365,7 @@ router.get('/status/:id', requireAuth, async (req, res) => {
     const { userId } = req.auth;
     const recharge = await prisma.recharge.findFirst({
       where: { id: req.params.id, userId },
-      select: { id: true, status: true, provider: true, amountCents: true, bonusCents: true, bonusPromotionKey: true, bonusMetadata: true, providerPaymentId: true, createdAt: true },
+      select: { id: true, status: true, provider: true, amountCents: true, bonusCents: true, bonusPromotionKey: true, bonusMetadata: true, providerPaymentId: true, createdAt: true, clipFlow: true, clipEnvironment: true },
     });
     if (!recharge) return res.status(404).json({ error: 'Recarga no encontrada' });
 

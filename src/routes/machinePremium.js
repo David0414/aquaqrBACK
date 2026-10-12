@@ -4,7 +4,11 @@ const { requireManagedMachine, requireAdministrator } = require('../utils/manage
 const { createClipCheckout, UUID, clipAuthorization } = require('../utils/clip');
 const { premiumQuote, activeMachinePremium, reconcileMachinePremium, PREMIUM_PLANS } = require('../utils/machinePremium');
 const { machineSales } = require('../utils/machineSales');
+const { transparentConfig, chargeTransparentPayment } = require('../utils/clipTransparent');
 const router = express.Router();
+const paymentResponse = (payment) => ({ paymentId: payment.id, amountCents: payment.amountCents, status: payment.status,
+  environment: payment.clipEnvironment, flow: payment.clipFlow, checkoutUrl: payment.checkoutUrl,
+  canPay: payment.clipFlow === 'TRANSPARENT' && payment.status === 'PENDING' && !payment.providerPaymentId && !payment.clipChargeStartedAt });
 function fail(res, error) {
   return res.status(error.statusCode || 500).json({ error: error.code || 'PREMIUM_UNAVAILABLE',
     message: error.statusCode ? error.message : 'No se pudo consultar Premium. Intenta nuevamente o contacta al administrador.' });
@@ -62,13 +66,65 @@ router.post('/machines/:id/premium/checkout', requireManagedMachine(), async (re
   }
 });
 
+router.post('/machines/:id/premium/prepare', requireManagedMachine(), async (req, res) => {
+  try {
+    if (req.management.role !== 'PARTNER') return res.status(400).json({ error: 'El administrador ya tiene acceso a las estadísticas.' });
+    const { environment } = transparentConfig();
+    const { requestId, expectedPriceCents } = req.body || {};
+    if (!UUID.test(requestId || '')) return res.status(400).json({ error: 'Solicitud de pago inválida' });
+    const machineId = req.managedMachine.id, userId = req.management.userId;
+    const key = `${userId}:${requestId}`;
+    const previous = await prisma.machinePremiumPayment.findUnique({ where: { requestId: key } });
+    if (previous) {
+      if (previous.machineId !== machineId || previous.amountCents !== expectedPriceCents || previous.clipFlow !== 'TRANSPARENT' || previous.clipEnvironment !== environment) return res.status(409).json({ error: 'Esta solicitud corresponde a otra compra.' });
+      return res.json(paymentResponse(previous));
+    }
+    const quote = await premiumQuote(prisma, machineId);
+    if (expectedPriceCents !== quote.amountCents) return res.status(409).json({ error: 'PRICE_CHANGED', message: 'El precio cambió. Revisa el importe antes de pagar.' });
+    let payment;
+    try {
+      payment = await prisma.machinePremiumPayment.create({ data: { machineId, userId, requestId: key,
+        amountCents: quote.amountCents, segment: quote.segment, volumeGarrafones: quote.volumeGarrafones,
+        volumeFrom: quote.volumeFrom, volumeTo: quote.volumeTo, clipFlow: 'TRANSPARENT', clipEnvironment: environment } });
+    } catch (failure) {
+      if (failure.code !== 'P2002') throw failure;
+      payment = await prisma.machinePremiumPayment.findUnique({ where: { requestId: key } });
+      if (!payment || payment.machineId !== machineId || payment.amountCents !== expectedPriceCents || payment.clipEnvironment !== environment) throw failure;
+    }
+    return res.json(paymentResponse(payment));
+  } catch (failure) { return fail(res, failure); }
+});
+
+router.post('/machines/:id/premium/payments/:paymentId/pay', requireManagedMachine(), async (req, res) => {
+  let payment;
+  try {
+    if (req.management.role !== 'PARTNER') return res.status(403).json({ error: 'Este pago es para socios.' });
+    payment = await prisma.machinePremiumPayment.findFirst({ where: { id: req.params.paymentId, machineId: req.managedMachine.id,
+      userId: req.management.userId, clipFlow: 'TRANSPARENT' } });
+    if (!payment) return res.status(404).json({ error: 'Pago no encontrado' });
+    if (payment.status === 'PENDING' && !payment.providerPaymentId && !payment.clipChargeStartedAt) {
+      payment = await chargeTransparentPayment(prisma, 'machinePremiumPayment', payment, req.body?.cardToken, req.body?.customer);
+    }
+    const result = await reconcileMachinePremium(prisma, payment);
+    return res.json({ ...paymentResponse(payment), ...result, canPay: false });
+  } catch (failure) {
+    if (payment) {
+      const latest = await prisma.machinePremiumPayment.findUnique({ where: { id: payment.id } }).catch(() => payment);
+      return res.status(failure.statusCode || 500).json({ ...paymentResponse(latest), error: failure.code || 'CLIP_PAYMENT_FAILED',
+        message: failure.statusCode ? failure.message : 'No se pudo confirmar el pago. Verifica su estado.' });
+    }
+    return fail(res, failure);
+  }
+});
+
 router.get('/machines/:id/premium/payments/:paymentId', requireManagedMachine(), async (req, res) => {
   try {
     const payment = await prisma.machinePremiumPayment.findFirst({ where: { id: req.params.paymentId, machineId: req.managedMachine.id,
       ...(req.management.role === 'ADMIN' ? {} : { userId: req.management.userId }) } });
     if (!payment) return res.status(404).json({ error: 'Pago no encontrado' });
     const result = await reconcileMachinePremium(prisma, payment);
-    return res.json({ paymentId: payment.id, checkoutUrl: payment.checkoutUrl, ...result });
+    res.set('Cache-Control', 'no-store');
+    return res.json({ ...paymentResponse(payment), ...result });
   } catch (error) { return fail(res, error); }
 });
 

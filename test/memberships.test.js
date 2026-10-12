@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { membershipQuote, membershipCoverage } = require('../src/utils/memberships');
+const { membershipQuote, membershipCoverage, membershipContext } = require('../src/utils/memberships');
 const { purchaseMembership } = require('../src/utils/membershipPurchase');
 const { chargeDispenseTx } = require('../src/utils/dispenseCharge');
 const { requireMachineCoins, requireCoinSession } = require('../src/utils/machineCoins');
@@ -103,9 +103,58 @@ test('a paid membership deducts the package price once, including promotional ba
   assert.equal(f.state().wallet[0].balanceCents, 11500);
 });
 
+test('membership catalog shows machine prices without a scanned QR and lets the customer choose another machine', async () => {
+  const f = fixture();
+  f.state().machine.push({ id: 'AGUA-02', name: 'Otra sucursal', hardwareId: '02', isActive: true, pricePerGarrafonCents: 7000 });
+  const initial = await membershipContext(f.client, 'customer');
+  assert.equal(initial.machine.id, 'AGUA-01');
+  assert.equal(initial.machines.length, 2);
+  assert.equal(membershipQuote(plan, initial.machine.pricePerGarrafonCents).purchasePriceCents, 9500);
+  const other = await membershipContext(f.client, 'customer', 'AGUA-02');
+  assert.equal(other.machine.id, 'AGUA-02');
+  assert.equal(membershipQuote(plan, other.machine.pricePerGarrafonCents).purchasePriceCents, 19000);
+  assert.equal(f.state().ledgerEntry.length, 0);
+});
+
+test('buying a package without QR or machine arguments uses a quoted active machine and charges only once', async () => {
+  const f = fixture();
+  const noQr = { purchaseId: 'purchase_no_qr_0001', expectedPriceCents: 9500 };
+  const purchase = await purchaseMembership(f.client, 'customer', plan, noQr);
+  assert.equal(purchase.membership.machineId, 'AGUA-01');
+  assert.equal(purchase.membership.litersTotal, 100);
+  assert.equal(purchase.wallet.balanceCents, 11500);
+  assert.equal((await purchaseMembership(f.client, 'customer', plan, noQr)).replay, true);
+  assert.equal(f.state().ledgerEntry.length, 1);
+});
+
+test('the machine of an active package is the default membership context and a no-QR purchase cannot bypass prices', async () => {
+  const f = fixture(30000, 0);
+  f.state().machine.push({ id: 'AGUA-02', hardwareId: '02', isActive: true, pricePerGarrafonCents: 7000 });
+  await assert.rejects(purchaseMembership(f.client, 'customer', plan, { purchaseId: 'purchase_changed_0001', expectedPriceCents: 1 }), { code: 'PRICE_CHANGED' });
+  assert.equal(f.state().wallet[0].balanceCents, 30000);
+  await purchaseMembership(f.client, 'customer', plan, { ...request, machineId: 'AGUA-02', hardwareId: '02', expectedPriceCents: 19000 });
+  assert.equal((await membershipContext(f.client, 'customer')).machine.id, 'AGUA-02');
+});
+
+test('no-QR memberships still reject inactive machines and do not debit when none are available', async () => {
+  const f = fixture(); f.state().machine[0].isActive = false;
+  const context = await membershipContext(f.client, 'customer');
+  assert.equal(context.machine, null); assert.equal(context.machines.length, 0);
+  await assert.rejects(purchaseMembership(f.client, 'customer', plan, { purchaseId: 'purchase_none_0001', expectedPriceCents: 9500 }), /No hay máquinas activas/);
+  await assert.rejects(membershipContext(f.client, 'customer', 'AGUA-01'), /seleccionada no está disponible/);
+  assert.equal(f.state().wallet[0].balanceCents, 20000); assert.equal(f.state().ledgerEntry.length, 0);
+});
+
+test('an invalid supplied hardware identifier is rejected rather than silently selecting a default machine', async () => {
+  const f = fixture();
+  await assert.rejects(purchaseMembership(f.client, 'customer', plan, { ...request, machineId: undefined, hardwareId: 'invalid-hardware' }), /máquina válida/);
+  assert.equal(f.state().wallet[0].balanceCents, 20000);
+  assert.equal(f.state().ledgerEntry.length, 0);
+});
+
 test('rejects an altered replay, changed machine price, unknown QR, insufficient funds and a second active package', async () => {
   const f = fixture();
-  await assert.rejects(purchaseMembership(f.client, 'customer', plan, { ...request, machineId: 'MISSING' }), /Escanea/);
+  await assert.rejects(purchaseMembership(f.client, 'customer', plan, { ...request, machineId: 'MISSING' }), /seleccionada no está disponible/);
   await assert.rejects(purchaseMembership(f.client, 'customer', plan, { ...request, hardwareId: '02' }), /hardware/);
   await assert.rejects(purchaseMembership(f.client, 'customer', plan, { ...request, expectedPriceCents: 9400 }), { code: 'PRICE_CHANGED' });
   assert.equal(f.state().ledgerEntry.length, 0);

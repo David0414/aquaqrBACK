@@ -1,4 +1,5 @@
 const { clipRequest, verifiedClipStatus } = require('./clip');
+const { verifiedTransparentStatus, transparentProof, paymentAction, transparentConfig } = require('./clipTransparent');
 
 const PREMIUM_PLANS = [
   { key: 'basic', label: 'Básico', maxGarrafones: 100, monthlyPriceCents: 27100, sortOrder: 1 },
@@ -36,7 +37,9 @@ async function premiumQuote(client, machineId, now = new Date()) {
 }
 
 async function activeMachinePremium(client, machineId, now = new Date()) {
-  return client.machinePremiumPayment.findFirst({ where: { machineId, status: 'SUCCEEDED', endsAt: { gt: now } }, orderBy: { endsAt: 'desc' } });
+  const environment = process.env.CLIP_API_KEY ? transparentConfig().environment : 'production';
+  return client.machinePremiumPayment.findFirst({ where: { machineId, status: 'SUCCEEDED', endsAt: { gt: now },
+    ...(process.env.CLIP_API_KEY ? { OR: [{ clipEnvironment: null }, { clipEnvironment: environment }] } : {}) }, orderBy: { endsAt: 'desc' } });
 }
 
 function addCalendarMonth(date) {
@@ -50,8 +53,8 @@ function addCalendarMonth(date) {
 }
 
 async function settleMachinePremium(client, payment, verified, now = new Date()) {
-  const status = verifiedClipStatus(payment, verified);
-  if (status === 'PENDING') return { status };
+  const status = payment.clipFlow === 'TRANSPARENT' ? verifiedTransparentStatus(payment, verified) : verifiedClipStatus(payment, verified);
+  if (status === 'PENDING') return { status, pendingAction: payment.clipFlow === 'TRANSPARENT' ? paymentAction(verified) : null };
   return client.$transaction(async (tx) => {
     const claimed = await tx.machinePremiumPayment.updateMany({ where: { id: payment.id, status: 'PENDING' }, data: { status } });
     if (!claimed.count) return tx.machinePremiumPayment.findUnique({ where: { id: payment.id }, select: { status: true, endsAt: true } });
@@ -68,7 +71,8 @@ async function settleMachinePremium(client, payment, verified, now = new Date())
 
 async function reconcileMachinePremium(client, payment) {
   if (payment.status !== 'PENDING' || !payment.providerPaymentId) return { status: payment.status, endsAt: payment.endsAt };
-  return settleMachinePremium(client, payment, await clipRequest('GET', payment.providerPaymentId));
+  return settleMachinePremium(client, payment, payment.clipFlow === 'TRANSPARENT'
+    ? await transparentProof(payment) : await clipRequest('GET', payment.providerPaymentId));
 }
 
 module.exports = { PREMIUM_PLANS, previousMexicoMonth, premiumSegment, premiumQuote, activeMachinePremium,

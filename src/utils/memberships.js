@@ -26,11 +26,27 @@ function membershipQuote(promotion, pricePerGarrafonCents) {
 async function membershipMachine(machineIdValue, hardwareIdValue, client = prisma) {
   const id = normalizeMachineId(machineIdValue);
   const hardwareId = normalizeHardwareId(hardwareIdValue);
+  if ((machineIdValue && !id) || (hardwareIdValue && !hardwareId)) throw accessError('Selecciona una máquina válida para esta membresía.');
   const machine = id ? await client.machine.findUnique({ where: { id } })
-    : hardwareId ? await client.machine.findFirst({ where: { hardwareId, isActive: true } }) : null;
-  if (!machine || !machine.isActive) throw accessError('Escanea el QR de una máquina activa para ver sus membresías');
+    : hardwareId ? await client.machine.findFirst({ where: { hardwareId, isActive: true } })
+      : await client.machine.findFirst({ where: { isActive: true }, orderBy: [{ name: 'asc' }, { id: 'asc' }] });
+  if (!machine || !machine.isActive) throw accessError(id || hardwareId
+    ? 'La máquina seleccionada no está disponible para comprar una membresía.'
+    : 'No hay máquinas activas para comprar una membresía.');
   if (hardwareId && normalizeHardwareId(machine.hardwareId) !== hardwareId) throw accessError('El QR no corresponde al hardware de esta máquina');
   return machine;
+}
+
+async function membershipContext(client, userId, machineId, hardwareId) {
+  const machines = await client.machine.findMany({ where: { isActive: true }, orderBy: [{ name: 'asc' }, { id: 'asc' }],
+    select: { id: true, name: true, location: true, pricePerGarrafonCents: true } });
+  let selected = null;
+  if (machineId || hardwareId) selected = await membershipMachine(machineId, hardwareId, client);
+  else if (machines.length) {
+    const active = await client.userMembership.findFirst({ where: activeMembershipWhere(userId), select: { machineId: true } });
+    selected = machines.find((machine) => machine.id === active?.machineId) || machines[0];
+  }
+  return { machine: selected, machines };
 }
 
 function activeMembershipWhere(userId, machineId, now = new Date(), purchasedBefore) {
@@ -62,4 +78,4 @@ async function membershipCoverage(client, userId, liters, machineId, { consume =
   return { coveredLiters, remainingLiters, hasCoverage: coveredLiters > 0 };
 }
 
-module.exports = { membershipQuote, membershipMachine, activeMembershipWhere, membershipCoverage };
+module.exports = { membershipQuote, membershipMachine, membershipContext, activeMembershipWhere, membershipCoverage };

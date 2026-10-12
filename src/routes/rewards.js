@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { prisma } = require('../db');
 const { requireAuth } = require('../utils/auth');
-const { membershipQuote, membershipMachine, activeMembershipWhere } = require('../utils/memberships');
+const { membershipQuote, membershipMachine, membershipContext, activeMembershipWhere } = require('../utils/memberships');
 const { purchaseMembership } = require('../utils/membershipPurchase');
 const {
   ensureWelcomeReward,
@@ -43,7 +43,9 @@ router.get('/summary', requireAuth, async (req, res) => {
     ]);
 
     const catalog = await getPromotionCatalog(prisma);
-    const machine = req.query.machineId || req.query.hardwareId
+    const context = req.query.membershipContext === '1'
+      ? await membershipContext(prisma, userId, req.query.machineId, req.query.hardwareId) : null;
+    const machine = context ? context.machine : req.query.machineId || req.query.hardwareId
       ? await membershipMachine(req.query.machineId, req.query.hardwareId) : null;
     const promotions = catalog.map((promotion) => promotion.kind === 'membership' && promotion.isActive && machine
       ? { ...promotion, config: { ...promotion.config, ...membershipQuote(promotion, machine.pricePerGarrafonCents) } } : promotion);
@@ -120,7 +122,8 @@ router.get('/summary', requireAuth, async (req, res) => {
         bonusRewardsCount: totals.bonusRewardsCount,
       },
       monthlyProgress: preview,
-      machine: machine ? { id: machine.id, name: machine.name, pricePerGarrafonCents: machine.pricePerGarrafonCents } : null,
+      machine: machine ? { id: machine.id, name: machine.name, location: machine.location, pricePerGarrafonCents: machine.pricePerGarrafonCents } : null,
+      membershipMachines: context?.machines || [],
       promotions: promotions.map((promotion) => ({
         key: promotion.key,
         title: promotion.title,

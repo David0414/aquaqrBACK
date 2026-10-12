@@ -33,7 +33,11 @@ las migraciones anteriores del proyecto.
 ## Precios por máquina
 
 El socio puede cambiar el precio de sus máquinas desde **Máquinas**. El cliente
-escanea el QR para ver el precio del paquete en esa máquina antes de pagarlo.
+entra a **Membresías** y ve los precios directamente, sin escanear QR para comprar.
+La pantalla utiliza la máquina previamente elegida, la de su paquete activo o la
+primera máquina activa. Permite cambiarla desde una lista antes de pagar.
+El paquete corresponde a la máquina indicada y conserva su precio al comprarlo.
+El QR se escanea cuando se va a dispensar agua, para abrir la sesión de esa máquina.
 La actualización de octubre aplica descuentos de $0.20, $0.30 y $0.40 por
 garrafón para paquetes de 5, 8 y 11. Con precio público de $18, cuestan $89,
 $141.60 y $193.60. Con otro precio, se resta el descuento a cada garrafón.
@@ -56,6 +60,12 @@ aceptador físico de monedas. El cierre físico requiere soporte del controlador
 
 Para la nueva actualización de precios, pagos con Clip y Premium de socios,
 consulta [CLIP_PREMIUM.md](CLIP_PREMIUM.md) y aplica su SQL antes de publicar.
+
+Si sólo aparece Bono por recarga, ejecutar
+[ACTIVAR_CASHBACK_SUPABASE.sql](ACTIVAR_CASHBACK_SUPABASE.sql) en Supabase SQL Editor.
+Habilita Cashback, que permanecía desactivado en el catálogo. Hay dos opciones
+a elegir y se activa una por 30 días; EVA Coins es automático. El administrador
+puede volver a cambiar la disponibilidad desde su panel.
 
 ## Verificación local
 

@@ -1,6 +1,7 @@
 const { randomUUID } = require('crypto');
 const { membershipQuote, membershipMachine, activeMembershipWhere } = require('./memberships');
 const { monthKey, startOfMonth } = require('./rewards');
+const { normalizeHardwareId } = require('./managementAccess');
 
 const fail = (message, statusCode, code, extra = {}) => Object.assign(new Error(message), { statusCode, code, ...extra });
 
@@ -10,7 +11,8 @@ async function purchaseMembership(client, userId, promotion, request = {}) {
   const runPurchase = () => client.$transaction(async (tx) => {
     const existingPurchase = await tx.userMembership.findUnique({ where: { purchaseKey } });
     if (existingPurchase) {
-      if (existingPurchase.promotionKey !== promotion.key || existingPurchase.machineId !== String(request.machineId || '').trim().toUpperCase()) {
+      if (existingPurchase.promotionKey !== promotion.key || (request.machineId && existingPurchase.machineId !== String(request.machineId).trim().toUpperCase())
+        || (request.hardwareId && normalizeHardwareId(existingPurchase.metadata?.hardwareId) !== normalizeHardwareId(request.hardwareId))) {
         throw fail('Esta solicitud ya corresponde a otra compra', 409);
       }
       return { membership: existingPurchase, wallet: await tx.wallet.findUnique({ where: { userId } }), replay: true };

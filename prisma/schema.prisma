@@ -100,6 +100,9 @@ model Recharge {
   providerPaymentId String?        @unique
   checkoutUrl       String?
   checkoutRequestId String?        @unique
+  clipFlow          String         @default("REDIRECTED")
+  clipEnvironment   String?
+  clipChargeStartedAt DateTime?
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
   user              User           @relation(fields: [userId], references: [id])
@@ -239,6 +242,9 @@ model MachinePremiumPayment {
   volumeTo          DateTime
   providerPaymentId String? @unique
   checkoutUrl       String?
+  clipFlow          String @default("REDIRECTED")
+  clipEnvironment   String?
+  clipChargeStartedAt DateTime?
   status            RechargeStatus @default(PENDING)
   startsAt          DateTime?
   endsAt            DateTime?
