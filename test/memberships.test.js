@@ -18,6 +18,7 @@ const matches = (row, where = {}) => Object.entries(where).every(([key, value]) 
     if (op === 'gt') return row[key] > expected;
     if (op === 'gte') return row[key] >= expected;
     if (op === 'lte') return row[key] <= expected;
+    if (op === 'lt') return row[key] < expected;
     if (op === 'in') return expected.includes(row[key]);
     throw Error(`Unsupported fixture operator ${op}`);
   });
@@ -78,6 +79,15 @@ test('membership prices follow each machine price and quote the entire package',
   assert.throws(() => membershipQuote(plan, -100));
 });
 
+test('spreadsheet bundles use fixed unit discounts and follow the machine price without imposing the example price', () => {
+  for (const [garrafones, discount, totalAt18] of [[5, 20, 8900], [8, 30, 14160], [11, 40, 19360]]) {
+    const promotion = { kind: 'membership', config: { garrafones, discountPerGarrafonCents: discount } };
+    assert.equal(membershipQuote(promotion, 1800).purchasePriceCents, totalAt18);
+    assert.equal(membershipQuote(promotion, 3500).purchasePriceCents, (3500 - discount) * garrafones);
+    assert.equal(membershipQuote(promotion, 1800).durationDays, null);
+  }
+});
+
 test('a paid membership deducts the package price once, including promotional balance, without monthly expiry', async () => {
   const f = fixture();
   const paid = await purchaseMembership(f.client, 'customer', plan, request);
@@ -122,7 +132,7 @@ test('retries serialization conflicts while retaining the same purchase identity
 
 test('failed activation rolls back the debit, package and ledger together', async () => {
   const f = fixture();
-  f.client.userPromotionSelection.createMany = async () => { throw Error('fixture unavailable'); };
+  f.client.ledgerEntry.create = async () => { throw Error('fixture unavailable'); };
   await assert.rejects(purchaseMembership(f.client, 'customer', plan, request));
   assert.equal(f.state().wallet[0].balanceCents, 20000);
   assert.equal(f.state().wallet[0].bonusBalanceCents, 1000);
@@ -135,21 +145,23 @@ test('an unpaid selection counts as zero active memberships', async () => {
   f.state().userPromotionSelection.push({ userId: 'customer', promotionKey: plan.key, expiresAt: null });
   const unpaid = await getUserPromotionSelectionState(f.client, 'customer', new Date(), [plan]);
   assert.deepEqual(unpaid.activePromotionKeys, []);
-  assert.equal(unpaid.complete, false);
+  assert.equal(unpaid.hasMembership, false);
+  assert.deepEqual(unpaid.activeMembershipKeys, []);
   await purchaseMembership(f.client, 'customer', plan, request);
   const paid = await getUserPromotionSelectionState(f.client, 'customer', new Date(), [plan]);
   assert.equal(paid.complete, true);
-  assert.deepEqual(paid.activePromotionKeys, [plan.key]);
+  assert.deepEqual(paid.activeMembershipKeys, [plan.key]);
 });
 
 test('memberships carry over between months while ordinary promotions retain their monthly selection', async () => {
   const f = fixture();
   await purchaseMembership(f.client, 'customer', plan, request);
-  f.state().userPromotionSelection[0].monthKey = '2026-09';
+  f.state().userMembership[0].startsAt = new Date('2026-09-01');
   f.state().userPromotionSelection.push({ userId: 'customer', monthKey: '2026-09', promotionKey: 'monthly_cashback', expiresAt: null });
   const state = await getUserPromotionSelectionState(f.client, 'customer', new Date('2026-10-06'),
     [plan, { key: 'monthly_cashback', kind: 'cashback', isActive: true }]);
-  assert.deepEqual(state.activePromotionKeys, [plan.key]);
+  assert.deepEqual(state.activeMembershipKeys, [plan.key]);
+  assert.deepEqual(state.activePromotionKeys, ['monthly_cashback']);
   assert.equal(state.complete, true);
 });
 
@@ -157,7 +169,7 @@ test('disabling future sales of a plan preserves access to its already paid lite
   const f = fixture();
   await purchaseMembership(f.client, 'customer', plan, request);
   const state = await getUserPromotionSelectionState(f.client, 'customer', new Date(), [{ ...plan, isActive: false }]);
-  assert.deepEqual(state.activePromotionKeys, [plan.key]);
+  assert.deepEqual(state.activeMembershipKeys, [plan.key]);
   assert.equal((await membershipCoverage(f.client, 'customer', 20, 'AGUA-01')).coveredLiters, 20);
 });
 
@@ -225,12 +237,14 @@ test('a concurrent change to remaining liters cannot consume them twice', async 
   assert.equal(f.state().userMembership[0].litersRemaining, 100);
 });
 
-test('an active paid package cannot be replaced by a monthly promotion', async () => {
+test('an active paid package preserves cashback and blocks the competing deposit bonus', async () => {
   const f = fixture();
   await purchaseMembership(f.client, 'customer', plan, request);
-  await assert.rejects(saveUserPromotionSelections(f.client, 'customer', ['monthly_cashback'], new Date(),
-    [plan, { key: 'monthly_cashback', kind: 'cashback', isActive: true }]), /Usa los litros/);
-  assert.equal(f.state().userPromotionSelection[0].promotionKey, plan.key);
+  await saveUserPromotionSelections(f.client, 'customer', ['monthly_cashback'], new Date(),
+    [plan, { key: 'monthly_cashback', kind: 'cashback', isActive: true }]);
+  await assert.rejects(saveUserPromotionSelections(f.client, 'customer', ['topup_bonus'], new Date(),
+    [plan, { key: 'topup_bonus', kind: 'topup', isActive: true }]), /reemplaza el bono/);
+  assert.equal(f.state().userMembership[0].litersRemaining, 100);
 });
 
 test('cashback and consumption rewards settle by month and remain idempotent', async () => {
@@ -254,6 +268,29 @@ test('cashback and consumption rewards settle by month and remain idempotent', a
   await settleMonthlyRewards(f.client, 'customer', new Date('2026-10-06'), promotions);
   assert.equal(f.state().wallet[0].bonusBalanceCents, balance);
   assert.equal(f.state().rewardCredit.length, 2);
+});
+
+test('a water package includes cashback on purchases during its active period and excludes later deposit-only purchases', async () => {
+  const f = fixture(0, 0);
+  f.state().userMembership.push({ userId: 'customer', pricePaidCents: 9500, startsAt: new Date('2026-09-10T12:00:00Z'),
+    updatedAt: new Date('2026-09-20T12:00:00Z'), status: 'EXHAUSTED', expiresAt: null });
+  f.state().userPromotionSelection.push({ userId: 'customer', monthKey: '2026-09', promotionKey: 'topup_bonus' });
+  for (const [day, covered, machineId] of [[9, 0, 'OTHER'], [12, 0, 'OTHER'], [19, 3500, 'AGUA-01'], [21, 0, 'OTHER']]) {
+    f.state().dispense.push({ userId: 'customer', machineId, status: 'COMPLETED', createdAt: new Date(`2026-09-${String(day).padStart(2, '0')}T13:00:00Z`),
+      liters: 20, totalCents: 3500, membershipCoveredCents: covered });
+  }
+  f.client.dispense.aggregate = async ({ where }) => {
+    const rows = f.state().dispense.filter((row) => matches(row, where));
+    return { _sum: { liters: rows.reduce((sum, row) => sum + row.liters, 0), totalCents: rows.reduce((sum, row) => sum + row.totalCents, 0) }, _count: { id: rows.length } };
+  };
+  f.client.wallet.upsert = async ({ where, update }) => f.client.wallet.update({ where, data: update });
+  const promotions = [{ key: 'monthly_cashback', kind: 'cashback', isActive: true, config: { tiers: [{ maxGarrafones: null, cashbackPerGarrafonCents: 50 }] } }];
+  const result = await settleMonthlyRewards(f.client, 'customer', new Date('2026-10-06T12:00:00Z'), promotions);
+  assert.equal(result.results[0].amountCents, 100);
+  assert.equal(f.state().wallet[0].bonusBalanceCents, 100);
+  assert.equal(f.state().rewardCredit[0].metadata.garrafones, 2);
+  await settleMonthlyRewards(f.client, 'customer', new Date('2026-10-06T12:00:00Z'), promotions);
+  assert.equal(f.state().wallet[0].bonusBalanceCents, 100);
 });
 
 test('coins are disabled by default, enabled only by admin and require the customer own active machine session', async () => {

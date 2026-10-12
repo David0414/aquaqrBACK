@@ -6,16 +6,25 @@ const express = require('express');
 process.env.MONITOR_ADMIN_USER = 'fixture-admin';
 process.env.MONITOR_ADMIN_PASSWORD = 'fixture-password';
 process.env.QR_SIGNING_SECRET = 'fixture-qr-secret';
-let users = [], machines = [], clerkAccounts = [], adminCredentials = [], credentialError = null;
+let users = [], machines = [], clerkAccounts = [], adminCredentials = [], credentialError = null, premiumPayments = [], premiumPlans = [];
 const matches = (row, where = {}) => Object.entries(where).every(([key, value]) => {
   if (value && typeof value === 'object') {
     if ('not' in value) return row[key] != null && row[key] !== value.not;
     if ('in' in value) return value.in.includes(row[key]);
+    if ('gt' in value) return row[key] > value.gt;
   }
   return row[key] === value;
 });
 const withPartner = (machine) => machine && ({ ...machine, partner: users.find((user) => user.id === machine.partnerId) || null });
 const db = {
+  machinePremiumPlan: {
+    findMany: async () => premiumPlans,
+    update: async ({ where, data }) => Object.assign(premiumPlans.find((plan) => plan.key === where.key), data),
+  },
+  machinePremiumPayment: {
+    findFirst: async ({ where }) => premiumPayments.find((payment) => matches(payment, where)) || null,
+    findUnique: async ({ where }) => premiumPayments.find((payment) => matches(payment, where)) || null,
+  },
   adminCredential: {
     findUnique: async ({ where }) => {
       if (credentialError) throw credentialError;
@@ -41,11 +50,11 @@ const db = {
     update: async ({ where, data }) => { const machine = machines.find((item) => matches(item, where)); Object.assign(machine, data); return withPartner(machine); },
     upsert: async ({ where, update, create }) => { let machine = machines.find((item) => matches(item, where)); if (machine) Object.assign(machine, update); else { machine = { ...create }; machines.push(machine); } return withPartner(machine); },
   },
-  dispense: { aggregate: async ({ where }) => ({ _count: { _all: where.machineId.in.length },
-    _sum: { liters: where.machineId.in.length * 20, totalCents: where.machineId.in.length * 3500 } }) },
+  dispense: { aggregate: async ({ where }) => { const count = typeof where.machineId === 'string' ? 1 : where.machineId.in.length;
+    return { _count: { _all: count }, _sum: { liters: count * 20, totalCents: count * 3500 } }; } },
   userMembership: { aggregate: async () => ({ _count: { _all: 0 }, _sum: { pricePaidCents: 0 } }) },
   appPromotion: { upsert: async ({ create }) => create, findMany: async () => [], updateMany: async () => ({ count: 0 }) },
-  $transaction: async (run) => run(db),
+  $transaction: async (run) => Array.isArray(run) ? Promise.all(run) : run(db),
 };
 const dbPath = require.resolve('../src/db');
 require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: { prisma: db } };
@@ -68,6 +77,7 @@ const app = express();
 app.use(express.json());
 app.use('/management', require('../src/routes/management'));
 app.use('/monitor', require('../src/routes/monitorAdmin'));
+app.use('/monitor', require('../src/routes/machinePremium'));
 app.use('/telemetry', require('../src/routes/telemetry'));
 app.use('/qr', require('../src/routes/qr'));
 const originalImmediate = global.setImmediate;
@@ -82,6 +92,8 @@ test.before(async () => {
 });
 test.after(() => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve); }));
 test.beforeEach(() => {
+  premiumPayments = [];
+  premiumPlans = structuredClone(require('../src/utils/machinePremium').PREMIUM_PLANS);
   clerkAccounts = [];
   adminCredentials = [];
   credentialError = null;
@@ -139,7 +151,7 @@ test('partner catalogs, sales totals and telemetry are limited to assigned machi
   assert.equal(result.status, 200);
   assert.deepEqual(result.data.machines.map((machine) => machine.id), ['AQ-001']);
   assert.equal(result.data.counts.machines, 1);
-  assert.equal(result.data.sales.revenueCents, 3500);
+  assert.equal(result.data.sales, null);
   assert.deepEqual(result.data.promotions, []);
   assert.equal((await request('/telemetry/machine/AQ-002', 'partner-1')).status, 404);
   assert.equal((await request('/telemetry/machine/AQ-001', 'partner-1')).status, 200);
@@ -332,4 +344,39 @@ test('malformed or oversized passwords cannot be used for database authenticatio
   assert.equal(await verifyAdminPassword('123', 'scrypt$invalid$invalid'), false);
   assert.equal(await authenticateAdmin('administrador', 'a'.repeat(257), db), null);
   assert.equal(await authenticateAdmin('administrador', null, db), null);
+});
+
+test('normal partners can calibrate but cannot read unpaid statistics or another machine Premium', async () => {
+  const info = await request('/monitor/machines/AQ-001/premium', 'partner-1');
+  assert.equal(info.status, 200);
+  assert.equal(info.data.quote.amountCents, 27100);
+  assert.equal(info.data.active, false);
+  assert.equal((await request('/monitor/machines/AQ-001/statistics', 'partner-1')).status, 403);
+  assert.equal((await request('/monitor/machines/AQ-002/premium', 'partner-1')).status, 404);
+  assert.equal((await request('/monitor/machines/AQ-002/statistics', 'partner-1')).status, 404);
+  assert.equal((await request('/dispense/config/pulses', 'partner-1', 'POST', { machineId: 'AQ-001', hardwareId: '01', pulsesPerLiter: 362 })).status, 200);
+  assert.equal((await request('/monitor/machines/AQ-001/statistics', 'admin')).status, 200);
+});
+
+test('paid machine statistics remain scoped and immediately close when Premium expires or ownership changes', async () => {
+  const payment = { machineId: 'AQ-001', status: 'SUCCEEDED', endsAt: new Date(Date.now() + 86400000) };
+  premiumPayments.push(payment);
+  const stats = await request('/monitor/machines/AQ-001/statistics', 'partner-1');
+  assert.equal(stats.status, 200);
+  assert.equal(stats.data.sales.revenueCents, 3500);
+  assert.equal((await request('/monitor/machines/AQ-002/statistics', 'partner-1')).status, 404);
+  machines[0].partnerId = 'partner-2';
+  assert.equal((await request('/monitor/machines/AQ-001/statistics', 'partner-1')).status, 404);
+  assert.equal((await request('/monitor/machines/AQ-001/statistics', 'partner-2')).status, 200);
+  payment.endsAt = new Date(Date.now() - 1);
+  assert.equal((await request('/monitor/machines/AQ-001/statistics', 'partner-2')).status, 403);
+});
+
+test('only an administrator may change the complete Premium tariff and invalid prices leave it intact', async () => {
+  const prices = premiumPlans.map((plan) => ({ key: plan.key, monthlyPriceCents: plan.monthlyPriceCents + 100 }));
+  assert.equal((await request('/monitor/premium/plans', 'partner-1', 'PUT', { prices })).status, 403);
+  assert.equal((await request('/monitor/premium/plans', 'admin', 'PUT', { prices: [{ key: 'basic', monthlyPriceCents: -1 }] })).status, 400);
+  assert.equal(premiumPlans[0].monthlyPriceCents, 27100);
+  assert.equal((await request('/monitor/premium/plans', 'admin', 'PUT', { prices })).status, 200);
+  assert.equal((await request('/monitor/machines/AQ-001/premium', 'partner-1')).data.quote.amountCents, 27200);
 });

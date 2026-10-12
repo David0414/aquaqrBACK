@@ -29,7 +29,7 @@ async function getRechargeHistoryItems(client, userId, { limit, cursor = null })
   ]);
 
   const pendingIds = recharges.filter((r) => r.status === 'PENDING' && r.providerPaymentId)
-    .map((r) => r.providerPaymentId);
+    .map((r) => r.provider === 'CLIP' ? `clip:${r.providerPaymentId}` : r.providerPaymentId);
   const postedCredits = pendingIds.length ? await client.ledgerEntry.findMany({
     where: { userId, type: 'CREDIT', status: 'POSTED', externalId: { in: pendingIds } },
     select: { externalId: true },
@@ -47,8 +47,8 @@ async function getRechargeHistoryItems(client, userId, { limit, cursor = null })
       totalReceivedAmount: ((r.amountCents || 0) + (r.bonusCents || 0)) / 100,
       currency: (r.currency || 'MXN').toUpperCase(),
       date: r.createdAt,
-      status: postedIds.has(r.providerPaymentId) ? 'completed' : (statuses[r.status] || 'completed'),
-      paymentMethod: r.provider === 'STRIPE' ? 'Stripe' : r.provider,
+      status: postedIds.has(r.provider === 'CLIP' ? `clip:${r.providerPaymentId}` : r.providerPaymentId) ? 'completed' : (statuses[r.status] || 'completed'),
+      paymentMethod: r.provider === 'STRIPE' ? 'Stripe' : r.provider === 'CLIP' ? 'Clip' : r.provider,
       providerPaymentId: r.providerPaymentId || undefined,
     })),
     ...coins.map((entry) => ({

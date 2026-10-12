@@ -19,9 +19,6 @@ const PROMOTION_KEYS = Object.freeze({
 const MONTHLY_SELECTABLE_PROMOTION_KEYS = Object.freeze([
   PROMOTION_KEYS.CASHBACK,
   PROMOTION_KEYS.TOPUP,
-  PROMOTION_KEYS.MEMBERSHIP_1,
-  PROMOTION_KEYS.MEMBERSHIP_2,
-  PROMOTION_KEYS.MEMBERSHIP_3,
 ]);
 
 const DEFAULT_PROMOTIONS = Object.freeze([
@@ -41,15 +38,15 @@ const DEFAULT_PROMOTIONS = Object.freeze([
     key: PROMOTION_KEYS.TOPUP,
     title: 'Recompensa por deposito (Top-Up)',
     summary: 'Recibe saldo extra al recargar',
-    description: 'Si eliges esta promocion, tus recargas tienen bono: recarga $100 y recibe $5 extra, recarga $200 y recibe $10 extra, recarga $500 y recibe $30 extra.',
+    description: 'Elige bono por depósito: desde $100 recibes 2.5%, desde $200 recibes 3.5% y con $500 recibes 4.5%. La membresía de agua reemplaza este bono.',
     kind: 'topup',
     sortOrder: 4,
     isActive: true,
     config: {
       tiers: [
-        { amountCents: 10000, bonusCents: 500, label: 'Recarga $100 -> recibe $5 adicionales' },
-        { amountCents: 20000, bonusCents: 1000, label: 'Recarga $200 -> recibe $10 adicionales' },
-        { amountCents: 50000, bonusCents: 3000, label: 'Recarga $500 -> recibe $30 adicionales' },
+        { amountCents: 10000, bonusCents: 250, bonusPercent: 2.5, label: 'Desde $100: 2.5% de bono' },
+        { amountCents: 20000, bonusCents: 700, bonusPercent: 3.5, label: 'Desde $200: 3.5% de bono' },
+        { amountCents: 50000, bonusCents: 2250, bonusPercent: 4.5, label: '$500: 4.5% de bono' },
       ],
     },
   },
@@ -70,15 +67,15 @@ const DEFAULT_PROMOTIONS = Object.freeze([
   },
   {
     key: PROMOTION_KEYS.POINTS,
-    title: 'Recompensa por consumo mensual',
+    title: 'EVA Coins por consumo mensual',
     summary: 'Cada 20 litros suman 10 puntos',
-    description: 'Beneficio automatico: cada 20 litros equivalen a 10 puntos. De 0 a 199 puntos no hay beneficio; con 200 puntos recibes $10 de saldo extra; con 500 puntos recibes $20; con 1,000 puntos recibes $30. Despues de 1,000 puntos el conteo vuelve a iniciar.',
+    description: 'EVA Coins siempre se acumula: cada 20 litros suman 10 puntos. Al cierre del mes, desde 200 puntos recibes $10, desde 500 recibes $20 y desde 1,000 recibes $30 de saldo extra.',
     kind: 'points',
     sortOrder: 2,
     isActive: true,
     config: {
       pointsPerLiter: DEFAULT_POINTS_PER_LITER,
-      resetAtPoints: 1000,
+      resetAtPoints: 0,
       tiers: [
         { minPoints: 0, bonusCents: 0, label: '0-199 puntos -> Sin beneficio' },
         { minPoints: 200, bonusCents: 1000, label: '200 puntos -> $10 saldo extra' },
@@ -89,7 +86,7 @@ const DEFAULT_PROMOTIONS = Object.freeze([
   },
   {
     key: PROMOTION_KEYS.MEMBERSHIP_1,
-    title: 'Membresia premium 1',
+    title: 'Paquete de 5 garrafones',
     summary: '5 garrafones con descuento, hasta agotarlos',
     description: 'Un pago incluye 5 garrafones. Precio ajustado a la máquina; puedes usarlos hasta agotarlos.',
     kind: 'membership',
@@ -97,13 +94,14 @@ const DEFAULT_PROMOTIONS = Object.freeze([
     isActive: true,
     config: {
       garrafones: 5,
+      discountPerGarrafonCents: 20,
       monthlyPriceCents: 9500,
       costPerGarrafonCents: 1900,
     },
   },
   {
     key: PROMOTION_KEYS.MEMBERSHIP_2,
-    title: 'Membresia premium 2',
+    title: 'Paquete de 8 garrafones',
     summary: '8 garrafones con descuento, hasta agotarlos',
     description: 'Un pago incluye 8 garrafones. Precio ajustado a la máquina; puedes usarlos hasta agotarlos.',
     kind: 'membership',
@@ -111,13 +109,14 @@ const DEFAULT_PROMOTIONS = Object.freeze([
     isActive: true,
     config: {
       garrafones: 8,
+      discountPerGarrafonCents: 30,
       monthlyPriceCents: 14800,
       costPerGarrafonCents: 1850,
     },
   },
   {
     key: PROMOTION_KEYS.MEMBERSHIP_3,
-    title: 'Membresia premium 3',
+    title: 'Paquete de 11 garrafones',
     summary: '11 garrafones con descuento, hasta agotarlos',
     description: 'Un pago incluye 11 garrafones. Precio ajustado a la máquina; puedes usarlos hasta agotarlos.',
     kind: 'membership',
@@ -125,6 +124,7 @@ const DEFAULT_PROMOTIONS = Object.freeze([
     isActive: true,
     config: {
       garrafones: 11,
+      discountPerGarrafonCents: 40,
       monthlyPriceCents: 19800,
       costPerGarrafonCents: 1800,
     },
@@ -211,7 +211,7 @@ function getTopUpBonusCents(amountCents, promotion) {
   const tier = tiers
     .filter((item) => Number(item.amountCents) <= amountCents)
     .sort((a, b) => Number(b.amountCents) - Number(a.amountCents))[0];
-  return Math.max(0, Number(tier?.bonusCents) || 0);
+  return Math.max(0, tier?.bonusPercent !== undefined ? Math.round(amountCents * Number(tier.bonusPercent) / 100) : Number(tier?.bonusCents) || 0);
 }
 
 function getMembershipBonusCents(amountCents, promotion, pricePerGarrafonCents = PRICE_PER_GARRAFON_CENTS) {
@@ -340,8 +340,8 @@ async function saveUserPromotionSelections(client, userId, promotionKeys, now = 
     await client.$transaction(async (tx) => {
       const paidMembership = await tx.userMembership.findFirst({ where: { userId, status: 'ACTIVE', litersRemaining: { gt: 0 },
         OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] } });
-      if (paidMembership && !uniqueKeys.includes(paidMembership.promotionKey)) {
-        throw new Error('Usa los litros de tu membresía antes de elegir otra promoción. Al agotarlos podrás cambiar.');
+      if (paidMembership && uniqueKeys.includes(PROMOTION_KEYS.TOPUP)) {
+        throw new Error('Tu membresía reemplaza el bono por depósito. Conservas cashback y EVA Coins.');
       }
       await tx.userPromotionSelection.deleteMany({
         where: {
@@ -398,18 +398,23 @@ async function getUserPromotionSelectionState(client, userId, now = new Date(), 
     .filter(Boolean)
     .sort((a, b) => new Date(a) - new Date(b))[0] || null;
   const membershipKeys = selectedPromotionKeys.filter((key) => getPromotionByKey(resolvedPromotions, key)?.kind === 'membership');
-  const paidMemberships = membershipKeys.length ? await client.userMembership.findMany({ where: { userId,
-    promotionKey: { in: membershipKeys }, status: 'ACTIVE', litersRemaining: { gt: 0 },
-    OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] } }) : [];
-  const activePromotionKeys = selectedPromotionKeys.filter((key) => !membershipKeys.includes(key) || paidMemberships.some((row) => row.promotionKey === key));
+  const paidMemberships = await client.userMembership.findMany({ where: { userId, status: 'ACTIVE', litersRemaining: { gt: 0 },
+    OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] } });
+  const hasMembership = paidMemberships.length > 0;
+  const finalSelectedKeys = selectedPromotionKeys.filter((key) => !membershipKeys.includes(key) && (!hasMembership || key !== PROMOTION_KEYS.TOPUP));
+  if (hasMembership && getPromotionByKey(resolvedPromotions, PROMOTION_KEYS.CASHBACK)?.isActive && !finalSelectedKeys.includes(PROMOTION_KEYS.CASHBACK)) finalSelectedKeys.push(PROMOTION_KEYS.CASHBACK);
+  const activePromotionKeys = finalSelectedKeys;
 
   return {
     month: selectionMonthKey,
-    requiredCount,
-    selectedPromotionKeys,
+    requiredCount: hasMembership ? 0 : requiredCount,
+    selectedPromotionKeys: finalSelectedKeys,
     activePromotionKeys,
-    complete: requiredCount === 0 ? true : activePromotionKeys.length > 0 && activePromotionKeys.length <= requiredCount,
-    selectablePromotions,
+    complete: hasMembership || requiredCount === 0 ? true : activePromotionKeys.length > 0 && activePromotionKeys.length <= requiredCount,
+    selectablePromotions: hasMembership ? [] : selectablePromotions,
+    hasMembership,
+    activeMembershipKeys: paidMemberships.map((membership) => membership.promotionKey),
+    cashbackIncluded: hasMembership,
     expiresAt,
     durationDays: membershipKeys.length ? null : PROMOTION_SELECTION_DAYS,
   };
@@ -536,6 +541,22 @@ async function getMonthlyCompletedDispenseStats(client, userId, fromDate, toDate
   };
 }
 
+async function cashbackEligibleGarrafones(client, userId, fromDate, toDate, selected, stats) {
+  if (selected) return stats.garrafones;
+  const memberships = await client.userMembership.findMany({ where: { userId, pricePaidCents: { gt: 0 },
+    startsAt: { lt: toDate }, status: { in: ['ACTIVE', 'EXHAUSTED'] } },
+    select: { startsAt: true, updatedAt: true, status: true, expiresAt: true } });
+  const intervals = memberships.map((membership) => {
+    let end = toDate;
+    if (membership.status === 'EXHAUSTED' && membership.updatedAt) end = new Date(Math.min(end, membership.updatedAt));
+    if (membership.expiresAt) end = new Date(Math.min(end, membership.expiresAt));
+    return { createdAt: { gte: membership.startsAt, lte: end } };
+  });
+  const water = await client.dispense.aggregate({ where: { userId, status: 'COMPLETED',
+    createdAt: { gte: fromDate, lt: toDate }, OR: [{ membershipCoveredCents: { gt: 0 } }, ...intervals] }, _sum: { liters: true } });
+  return Number(water._sum.liters || 0) / GARRAFON_LITERS;
+}
+
 async function settleMonthlyRewards(client, userId, now = new Date(), promotions = null) {
   const resolvedPromotions = await resolvePromotions(client, promotions);
   const previousMonth = addMonths(startOfMonth(now), -1);
@@ -546,7 +567,7 @@ async function settleMonthlyRewards(client, userId, now = new Date(), promotions
   const stats = await getMonthlyCompletedDispenseStats(client, userId, fromDate, toDate);
   const results = [];
 
-  if (stats.liters <= 0 || stats.totalCents <= 0) {
+  if (stats.liters <= 0) {
     return {
       settledMonth: key,
       stats,
@@ -555,10 +576,11 @@ async function settleMonthlyRewards(client, userId, now = new Date(), promotions
   }
 
   const cashbackPromotion = getPromotionByKey(resolvedPromotions, PROMOTION_KEYS.CASHBACK);
-  if (cashbackPromotion?.isActive && selectedPromotionKeys.has(PROMOTION_KEYS.CASHBACK)) {
+  if (cashbackPromotion?.isActive) {
+    const cashbackGarrafones = await cashbackEligibleGarrafones(client, userId, fromDate, toDate, selectedPromotionKeys.has(PROMOTION_KEYS.CASHBACK), stats);
     const cashbackTier = getCashbackTier(stats.garrafones, cashbackPromotion);
     const cashbackPerGarrafonCents = Number(cashbackTier?.cashbackPerGarrafonCents) || 0;
-    const cashbackCents = Math.round(stats.garrafones * cashbackPerGarrafonCents);
+    const cashbackCents = Math.round(cashbackGarrafones * cashbackPerGarrafonCents);
 
     const outcome = await client.$transaction(async (tx) => applyRewardCreditTx(tx, {
       userId,
@@ -568,8 +590,8 @@ async function settleMonthlyRewards(client, userId, now = new Date(), promotions
       description: `Cashback mensual ${key}`,
       metadata: {
         month: key,
-        liters: stats.liters,
-        garrafones: Number(stats.garrafones.toFixed(3)),
+        liters: cashbackGarrafones * GARRAFON_LITERS,
+        garrafones: Number(cashbackGarrafones.toFixed(3)),
         cashbackPerGarrafonCents,
       },
     }));
@@ -626,11 +648,13 @@ async function getCurrentMonthRewardPreview(client, userId, now = new Date(), pr
   const cashbackPromotion = getPromotionByKey(resolvedPromotions, PROMOTION_KEYS.CASHBACK);
   const pointsPromotion = getPromotionByKey(resolvedPromotions, PROMOTION_KEYS.POINTS);
 
-  const cashbackTier = cashbackPromotion?.isActive && selectedPromotionKeys.has(PROMOTION_KEYS.CASHBACK)
+  const cashbackGarrafones = cashbackPromotion?.isActive ? await cashbackEligibleGarrafones(client, userId, fromDate, toDate,
+    selectedPromotionKeys.has(PROMOTION_KEYS.CASHBACK), stats) : 0;
+  const cashbackTier = cashbackPromotion?.isActive && cashbackGarrafones > 0
     ? getCashbackTier(stats.garrafones, cashbackPromotion)
     : null;
   const cashbackPerGarrafonCents = Number(cashbackTier?.cashbackPerGarrafonCents) || 0;
-  const estimatedCashbackCents = Math.round(stats.garrafones * cashbackPerGarrafonCents);
+  const estimatedCashbackCents = Math.round(cashbackGarrafones * cashbackPerGarrafonCents);
 
   const pointsPerLiter = Math.max(0, Number(pointsPromotion?.config?.pointsPerLiter) || DEFAULT_POINTS_PER_LITER);
   const points = Math.round(stats.liters * pointsPerLiter);

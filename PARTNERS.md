@@ -111,6 +111,10 @@ en lugar de confiar en el que envíe el navegador.
 
 ## Verificación
 
+El Premium de estadísticas por máquina y los pagos con Clip se describen en
+[CLIP_PREMIUM.md](CLIP_PREMIUM.md). Los controles y el desfase en ml pertenecen
+al acceso normal; las estadísticas de socios requieren Premium pagado y vigente.
+
 Los cambios de membresías por consumo y control de monedas requieren otra
 actualización en Supabase. Consulta [MEMBERSHIPS.md](MEMBERSHIPS.md) para pegar
 el SQL y configurar cada máquina.

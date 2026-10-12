@@ -9,11 +9,13 @@ function membershipQuote(promotion, pricePerGarrafonCents) {
   const publicPrice = Number(pricePerGarrafonCents);
   const referencePrice = Number(config.referencePricePerGarrafonCents || 3500);
   const referenceUnit = Number(config.costPerGarrafonCents || Number(config.monthlyPriceCents) / garrafones);
+  const discount = config.discountPerGarrafonCents;
   if (!Number.isInteger(garrafones) || garrafones <= 0 || !Number.isSafeInteger(publicPrice) || publicPrice <= 0
-    || !Number.isFinite(referenceUnit) || referenceUnit <= 0 || referenceUnit >= referencePrice) {
+    || (discount === undefined ? !Number.isFinite(referenceUnit) || referenceUnit <= 0 || referenceUnit >= referencePrice
+      : !Number.isSafeInteger(discount) || discount <= 0 || discount >= publicPrice)) {
     throw accessError('Configuración de membresía inválida');
   }
-  const costPerGarrafonCents = Math.max(1, Math.round(publicPrice * referenceUnit / referencePrice));
+  const costPerGarrafonCents = discount === undefined ? Math.max(1, Math.round(publicPrice * referenceUnit / referencePrice)) : publicPrice - discount;
   const purchasePriceCents = costPerGarrafonCents * garrafones;
   const standardPriceCents = publicPrice * garrafones;
   return { garrafones, litersTotal: garrafones * 20, costPerGarrafonCents, purchasePriceCents,

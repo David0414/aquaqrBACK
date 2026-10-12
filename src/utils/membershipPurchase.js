@@ -43,8 +43,7 @@ async function purchaseMembership(client, userId, promotion, request = {}) {
     await tx.ledgerEntry.create({ data: { userId, type: 'DEBIT', amountCents: quote.purchasePriceCents, currency: 'MXN',
       description: `Compra de membresía: ${quote.garrafones} garrafones en ${machine.id}`,
       source: `MEMBERSHIP:${promotion.key}`, externalId: `MEMBERSHIP:${membership.id}`, status: 'POSTED' } });
-    await tx.userPromotionSelection.deleteMany({ where: { userId, OR: [{ monthKey: monthKey(startOfMonth(startsAt)) }, { expiresAt: null }, { expiresAt: { gt: startsAt } }] } });
-    await tx.userPromotionSelection.createMany({ data: [{ userId, monthKey: monthKey(startOfMonth(startsAt)), promotionKey: promotion.key, expiresAt: null }] });
+    await tx.userPromotionSelection.deleteMany({ where: { userId, promotionKey: 'topup_bonus', OR: [{ monthKey: monthKey(startOfMonth(startsAt)) }, { expiresAt: null }, { expiresAt: { gt: startsAt } }] } });
     return { membership, wallet: await tx.wallet.findUnique({ where: { userId } }), replay: false };
   }, { isolationLevel: 'Serializable' });
   for (let attempt = 0; ; attempt += 1) {

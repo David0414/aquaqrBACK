@@ -89,7 +89,10 @@ app.use('/api/qr', qrRoutes);
 app.use('/m', qrRoutes);
 
 app.use('/api', walletRoutes);
+app.use('/api/recharge', require('./routes/clipRecharge'));
 app.use('/api/recharge', rechargeRoutes);
+app.use('/api/monitor-admin', require('./routes/machinePremium'));
+app.use('/api/payments/clip', require('./routes/clipWebhook'));
 app.use('/api/dispense', dispenseRoutes);
 app.use('/api/rewards', rewardsRoutes);
 app.use('/api/monitor-admin', monitorAdminRoutes);

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { saveUserPromotionSelections, getUserPromotionSelectionState } = require('../src/utils/rewards');
+const { saveUserPromotionSelections, getUserPromotionSelectionState, getRechargeBonusOffer, getPointsTier, DEFAULT_PROMOTIONS } = require('../src/utils/rewards');
 
 const promotions = [
   { key: 'topup_bonus', kind: 'topup', isActive: true },
@@ -32,9 +32,23 @@ test('saves one promotion and replaces the previous selection', async () => {
 
 test('reports one available slot and asks existing two-benefit selections to be updated', async () => {
   for (const keys of [[], ['topup_bonus'], ['topup_bonus', 'monthly_cashback']]) {
-    const client = { userPromotionSelection: { findMany: async () => keys.map((promotionKey) => ({ promotionKey, monthKey: '2026-10' })) } };
+    const client = { userMembership: { findMany: async () => [] }, userPromotionSelection: { findMany: async () => keys.map((promotionKey) => ({ promotionKey, monthKey: '2026-10' })) } };
     const state = await getUserPromotionSelectionState(client, 'user-1', now, promotions);
     assert.equal(state.requiredCount, 1);
     assert.equal(state.complete, keys.length === 1);
+  }
+});
+
+test('deposit tiers use 2.5%, 3.5% and 4.5%, including custom amounts, and require the chosen deposit benefit', () => {
+  for (const [amountCents, bonusCents] of [[10000, 250], [15000, 375], [20000, 700], [40000, 1400], [50000, 2250]]) {
+    assert.equal(getRechargeBonusOffer(amountCents, ['topup_bonus'], DEFAULT_PROMOTIONS).bonusCents, bonusCents);
+  }
+  assert.equal(getRechargeBonusOffer(50000, ['monthly_cashback'], DEFAULT_PROMOTIONS).bonusCents, 0);
+});
+
+test('EVA Coins applies all three spreadsheet thresholds and retains the 100+ garrafones tier', () => {
+  const promotion = DEFAULT_PROMOTIONS.find((p) => p.key === 'monthly_consumption_points');
+  for (const [points, bonus] of [[199, 0], [200, 1000], [500, 2000], [1000, 3000], [1500, 3000], [2000, 3000]]) {
+    assert.equal(getPointsTier(points, promotion).bonusCents, bonus);
   }
 });

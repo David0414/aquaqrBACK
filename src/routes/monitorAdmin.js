@@ -166,6 +166,7 @@ router.delete('/machines/:id', requireAdministrator, async (req, res) => {
     await prisma.machine.delete({ where: { id } });
     return res.json({ ok: true, deletedId: id });
   } catch (error) {
+    if (error.code === 'P2003') return res.status(409).json({ error: 'Esta máquina tiene historial de pagos. Desactívala para conservar ese historial.' });
     console.error('DELETE /api/monitor-admin/machines/:id error', error);
     return res.status(500).json({ error: 'No se pudo eliminar la maquina' });
   }
@@ -256,7 +257,7 @@ router.get('/summary', requireManagement, async (req, res) => {
     ]);
     const machines = req.management.role === 'ADMIN' ? mergeMachines(dbMachines) : dbMachines;
     const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const sales = await machineSales(prisma, dbMachines.map((machine) => machine.id), since);
+    const sales = req.management.role === 'ADMIN' ? await machineSales(prisma, dbMachines.map((machine) => machine.id), since) : null;
 
     return res.json({
       machines,

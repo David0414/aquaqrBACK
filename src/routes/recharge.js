@@ -4,7 +4,7 @@ const router = express.Router();
 const Stripe = require('stripe');
 const { prisma } = require('../db');
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'stripe-not-configured', {
   apiVersion: '2024-06-20',
 });
 
@@ -317,6 +317,7 @@ async function creditWalletAndCloseRechargeTX(tx, { userId, amountCents, currenc
 
 /** Consulta Stripe y reconcilia una recarga concreta. */
 async function reconcileOneRecharge(recharge) {
+  if (recharge.provider === 'CLIP') return require('../utils/clipSettlement').reconcileClipRecharge(prisma, recharge);
   if (!recharge?.providerPaymentId) {
     return { status: recharge.status || 'PENDING' };
   }
@@ -364,7 +365,7 @@ router.get('/status/:id', requireAuth, async (req, res) => {
     const { userId } = req.auth;
     const recharge = await prisma.recharge.findFirst({
       where: { id: req.params.id, userId },
-      select: { id: true, status: true, providerPaymentId: true, createdAt: true },
+      select: { id: true, status: true, provider: true, amountCents: true, bonusCents: true, bonusPromotionKey: true, bonusMetadata: true, providerPaymentId: true, createdAt: true },
     });
     if (!recharge) return res.status(404).json({ error: 'Recarga no encontrada' });
 

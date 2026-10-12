@@ -45,7 +45,7 @@ router.get('/summary', requireAuth, async (req, res) => {
     const catalog = await getPromotionCatalog(prisma);
     const machine = req.query.machineId || req.query.hardwareId
       ? await membershipMachine(req.query.machineId, req.query.hardwareId) : null;
-    const promotions = catalog.map((promotion) => promotion.kind === 'membership' && machine
+    const promotions = catalog.map((promotion) => promotion.kind === 'membership' && promotion.isActive && machine
       ? { ...promotion, config: { ...promotion.config, ...membershipQuote(promotion, machine.pricePerGarrafonCents) } } : promotion);
 
     await Promise.all([
@@ -94,10 +94,8 @@ router.get('/summary', requireAuth, async (req, res) => {
     const welcomeUsed = Boolean(welcomeCredit) && !welcomeAvailable;
     const activeMembershipByKey = new Map(activeMemberships.map((item) => [item.promotionKey, item]));
     const isPromotionEnabledForUser = (promotion) => {
+      if (promotion.kind === 'membership') return activeMembershipByKey.has(promotion.key);
       if (!isMonthlySelectablePromotion(promotion)) return Boolean(promotion.isActive);
-      if (promotion.kind === 'membership') {
-        return selectionState.selectedPromotionKeys.includes(promotion.key) && activeMembershipByKey.has(promotion.key);
-      }
       return selectionState.selectedPromotionKeys.includes(promotion.key);
     };
 
@@ -134,6 +132,7 @@ router.get('/summary', requireAuth, async (req, res) => {
         requiresMonthlySelection: isMonthlySelectablePromotion(promotion),
         isSelectedForMonth: selectionState.selectedPromotionKeys.includes(promotion.key),
         isEnabledForUserThisMonth: isPromotionEnabledForUser(promotion),
+        blockedByMembership: selectionState.hasMembership && promotion.key === 'topup_bonus',
         config: promotion.config || {},
         status: promotion.key === 'welcome_first_garrafon'
           ? {
@@ -170,6 +169,8 @@ router.get('/summary', requireAuth, async (req, res) => {
         complete: selectionState.complete,
         expiresAt: selectionState.expiresAt,
         durationDays: selectionState.durationDays,
+        hasMembership: selectionState.hasMembership,
+        cashbackIncluded: selectionState.cashbackIncluded,
         selectablePromotions: selectionState.selectablePromotions.map((promotion) => ({
           key: promotion.key,
           title: promotion.title,

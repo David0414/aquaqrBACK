@@ -7,7 +7,7 @@ const { prisma } = require('../db'); // usa el singleton
 const { sendUserNotification } = require('../utils/notifications');
 const { applyRewardCreditTx, getPromotionCatalog, inferRechargeBonusOffer } = require('../utils/rewards');
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'stripe-not-configured', {
   apiVersion: '2024-06-20',
 });
 

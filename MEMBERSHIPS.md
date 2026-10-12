@@ -8,8 +8,9 @@ agua al precio normal. Si un llenado supera los litros restantes, solo se cobra
 con saldo la diferencia.
 
 Cashback y recompensa por consumo conservan su cálculo y liquidación mensual.
-El cliente elige un beneficio; una membresía sin pagar muestra cero beneficios
-activados. Una membresía pagada ocupa ese lugar hasta agotarse.
+Sin paquete, el cliente elige cashback o bono por depósito. Con un paquete pagado
+conserva cashback y EVA Coins; el paquete reemplaza el bono por depósito hasta
+agotar sus litros. EVA Coins es automático e independiente.
 
 ## Actualizar Supabase
 
@@ -33,9 +34,9 @@ las migraciones anteriores del proyecto.
 
 El socio puede cambiar el precio de sus máquinas desde **Máquinas**. El cliente
 escanea el QR para ver el precio del paquete en esa máquina antes de pagarlo.
-Los descuentos conservan la proporción del catálogo: con un precio público de
-$35, los paquetes cuestan $95, $148 y $198. Con otro precio, los importes se
-ajustan proporcionalmente, redondeando el precio por garrafón a centavos.
+La actualización de octubre aplica descuentos de $0.20, $0.30 y $0.40 por
+garrafón para paquetes de 5, 8 y 11. Con precio público de $18, cuestan $89,
+$141.60 y $193.60. Con otro precio, se resta el descuento a cada garrafón.
 Cambiar el precio no modifica los litros de paquetes ya pagados.
 El historial muestra la compra del paquete y los llenados cubiertos. Los ingresos
 del socio incluyen el pago de la membresía y el agua cobrada aparte, evitando
@@ -52,6 +53,9 @@ cliente tiene una sesión activa en ella después de escanear su QR. El historia
 mantiene las recargas por monedas realizadas anteriormente.
 Este control autoriza comandos y acreditaciones del backend; no configura el
 aceptador físico de monedas. El cierre físico requiere soporte del controlador.
+
+Para la nueva actualización de precios, pagos con Clip y Premium de socios,
+consulta [CLIP_PREMIUM.md](CLIP_PREMIUM.md) y aplica su SQL antes de publicar.
 
 ## Verificación local
 
