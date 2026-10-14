@@ -94,6 +94,8 @@ test('payment contact details come from the saved account profile without checko
     return { email: 'buyer@example.test', phone: '+52 55 5555 5555' };
   } } };
   assert.deepEqual(await paymentCustomerFromUser(db, 'customer'), { email: 'buyer@example.test', phone: '525555555555' });
+  assert.deepEqual(await paymentCustomerFromUser(db, 'customer', { email: 'typed@example.test', phone: '+52 55 1111 2222' }),
+    { email: 'typed@example.test', phone: '525511112222' });
   await assert.rejects(paymentCustomerFromUser({ user: { findUnique: async () => ({}) } }, 'customer'), { code: 'INVALID_CUSTOMER' });
   assert.deepEqual(await paymentCustomerFromUser({ user: { findUnique: async () => ({}) } }, 'customer', customer), customer);
 });
@@ -191,8 +193,7 @@ test('real HTTP routes enforce ownership, process sandbox payments and verify we
     if (options.method === 'POST') {
       charges++; const body = JSON.parse(options.body);
       const payment = [...f.rows().recharge, ...f.rows().machinePremiumPayment].find((row) => row.id === body.external_reference);
-      const profile = f.rows().user.find((user) => user.id === payment.userId);
-      assert.deepEqual(body.customer, { email: profile.email, phone: profile.phone });
+      assert.deepEqual(body.customer, customer);
       const id = charges === 1 ? providerId : token;
       const value = { id, external_reference: body.external_reference, amount: body.amount, currency: 'MXN', status: 'approved' };
       remote.set(id, value); return response(value);

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createClipCheckout, clipAuthorization, clipCheckoutEnvironment, verifiedClipStatus } = require('../src/utils/clip');
+const { clipAuthorization, verifiedClipStatus } = require('../src/utils/clip');
 const { settleClipRecharge } = require('../src/utils/clipSettlement');
 const { PREMIUM_PLANS, premiumSegment, previousMexicoMonth, addCalendarMonth, settleMachinePremium } = require('../src/utils/machinePremium');
 process.env.CLIP_AUTH_TOKEN = 'fixture-token';
@@ -9,19 +9,6 @@ process.env.API_PUBLIC_URL = 'https://api.example.test';
 const providerPaymentId = '11111111-2222-4333-8444-555555555555';
 const proof = (payment, status = 'CHECKOUT_COMPLETED') => ({ payment_request_id: payment.providerPaymentId,
   metadata: { external_reference: payment.id }, amount: payment.amountCents / 100, currency: 'MXN', status });
-
-test('redirected checkouts record the sandbox or production environment from server credentials', () => {
-  const oldApiKey = process.env.CLIP_API_KEY, oldAuth = process.env.CLIP_AUTH_TOKEN;
-  process.env.CLIP_API_KEY = 'test_checkout_key';
-  assert.equal(clipCheckoutEnvironment(), 'sandbox');
-  process.env.CLIP_API_KEY = 'live_checkout_key';
-  assert.equal(clipCheckoutEnvironment(), 'production');
-  delete process.env.CLIP_API_KEY;
-  process.env.CLIP_AUTH_TOKEN = `Basic ${Buffer.from('test_checkout_key:secret').toString('base64')}`;
-  assert.equal(clipCheckoutEnvironment(), 'sandbox');
-  if (oldApiKey === undefined) delete process.env.CLIP_API_KEY; else process.env.CLIP_API_KEY = oldApiKey;
-  if (oldAuth === undefined) delete process.env.CLIP_AUTH_TOKEN; else process.env.CLIP_AUTH_TOKEN = oldAuth;
-});
 
 function database(payment, table = 'recharge') {
   let state = { recharge: [], machinePremiumPayment: [], wallet: [], ledgerEntry: [], rewardCredit: [], machine: [{ id: 'AQ-001' }] };
@@ -35,7 +22,7 @@ function database(payment, table = 'recharge') {
     updateMany: async ({ where, data }) => { const rows = state[key].filter((row) => matches(row, where));
       rows.forEach((row) => Object.entries(data).forEach(([field, value]) => { row[field] = typeof value === 'object' && value?.increment !== undefined ? Number(row[field] || 0) + value.increment : value; })); return { count: rows.length }; },
     update: async ({ where, data }) => { await client[key].updateMany({ where, data }); return client[key].findUnique({ where }); },
-    create: async ({ data }) => { const row = { id: `${key}_${state[key].length}`, ...data }; state[key].push(row); return structuredClone(row); },
+    create: async ({ data }) => { const row = { id: `${key}_${state[key].length}`, providerPaymentId: null, clipChargeStartedAt: null, ...data }; state[key].push(row); return structuredClone(row); },
     upsert: async ({ where, create, update }) => { const row = state[key].find((r) => matches(r, where));
       if (!row) return client[key].create({ data: create }); await client[key].updateMany({ where, data: update }); return client[key].findUnique({ where }); },
   };
@@ -49,16 +36,10 @@ function database(payment, table = 'recharge') {
   return { client, state: () => state };
 }
 
-test('Clip checkout uses server credentials, exact cents, bound reference and authenticated return paths', async () => {
-  let body;
-  const result = await createClipCheckout({ id: 'payment_1', amountCents: 10055, description: 'Saldo', returnPath: '/balance-recharge?clipRecharge=payment_1',
-    fetcher: async (url, options) => { assert.equal(url, 'https://api.payclip.com/v2/checkout'); assert.equal(options.headers.Authorization, 'Basic fixture-token');
-      body = JSON.parse(options.body); return { ok: true, json: async () => ({ payment_request_id: providerPaymentId, payment_request_url: `https://pago.clip.mx/${providerPaymentId}` }) }; } });
-  assert.equal(body.amount, 100.55);
-  assert.deepEqual(body.metadata, { external_reference: 'payment_1' });
-  assert.equal(body.redirection_url.success, 'https://app.example.test/balance-recharge?clipRecharge=payment_1');
-  assert.equal(body.webhook_url, 'https://api.example.test/api/payments/clip/webhook');
-  assert.equal(result.providerPaymentId, providerPaymentId);
+test('legacy Clip checkout payments remain limited to verified settlement records', () => {
+  const payment = { id: 'payment_1', amountCents: 10055, providerPaymentId };
+  assert.equal(verifiedClipStatus(payment, { payment_request_id: providerPaymentId,
+    metadata: { external_reference: 'payment_1' }, amount: 100.55, currency: 'MXN', status: 'CHECKOUT_PENDING' }), 'PENDING');
   const token = process.env.CLIP_AUTH_TOKEN; delete process.env.CLIP_AUTH_TOKEN;
   assert.throws(clipAuthorization, /no están configurados/); process.env.CLIP_AUTH_TOKEN = token;
 });
@@ -122,10 +103,13 @@ test('verified Premium invoices extend only their own machine and do not credit 
   assert.equal(f.state().wallet.length, 0);
 });
 
-test('real Clip routes bind a checkout to its owner, reuse retries and distrust a forged webhook success', async () => {
+test('Clip app checkout creates no external link, binds a tokenized in-app charge to its owner and credits once', async () => {
   const express = require('express');
   const f = database({ id: 'unrelated', userId: 'other', provider: 'CLIP', status: 'PENDING' });
-  f.client.user = { upsert: async ({ create }) => create };
+  const oldApiKey = process.env.CLIP_API_KEY;
+  process.env.CLIP_API_KEY = 'test_aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  f.client.user = { upsert: async ({ create }) => create,
+    findUnique: async () => ({ email: 'saved@example.test', phone: '5555555555' }) };
   const rewards = require('../src/utils/rewards');
   f.client.appPromotion = { upsert: async ({ create }) => create, findMany: async () => rewards.DEFAULT_PROMOTIONS, updateMany: async () => ({ count: 0 }) };
   f.client.userPromotionSelection = { findMany: async () => [{ promotionKey: 'topup_bonus', monthKey: rewards.monthKey(new Date()), expiresAt: new Date(Date.now() + 86400000) }] };
@@ -138,14 +122,12 @@ test('real Clip routes bind a checkout to its owner, reuse retries and distrust 
     if (!['customer', 'other'].includes(id)) return res.status(401).json({ error: 'Unauthorized' });
     req.auth = { userId: id }; next();
   } } };
-  let createdLinks = 0, remoteStatus = 'CHECKOUT_PENDING', externalReference, checkoutPayload;
+  let charges = 0, chargePayload;
   global.fetch = async (url, options) => {
-    if (!String(url).startsWith('https://api.payclip.com/')) throw new Error('Unexpected external request');
-    if (options.method === 'POST') {
-      createdLinks++; checkoutPayload = JSON.parse(options.body); externalReference = checkoutPayload.metadata.external_reference;
-      return { ok: true, json: async () => ({ payment_request_id: providerPaymentId, payment_request_url: `https://pago.clip.mx/${providerPaymentId}` }) };
-    }
-    return { ok: true, json: async () => ({ payment_request_id: providerPaymentId, metadata: { external_reference: externalReference }, amount: 100, currency: 'MXN', status: remoteStatus }) };
+    if (url !== 'https://api.payclip.com/payments' || options.method !== 'POST') throw new Error('Unexpected Clip request');
+    charges++; chargePayload = JSON.parse(options.body);
+    return { ok: true, json: async () => ({ id: providerPaymentId, external_reference: chargePayload.external_reference,
+      amount: chargePayload.amount, currency: 'MXN', tip_amount: 0, amount_refunded: 0, status: 'approved' }) };
   };
   const app = express(); app.use(express.json()); app.use('/recharge', require('../src/routes/clipRecharge')); app.use('/clip', require('../src/routes/clipWebhook'));
   const server = app.listen(0, '127.0.0.1'); await new Promise((resolve) => server.once('listening', resolve));
@@ -156,23 +138,28 @@ test('real Clip routes bind a checkout to its owner, reuse retries and distrust 
   };
   try {
     const body = { amountCents: 10000, requestId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' };
-    assert.equal((await request('/recharge/clip/create-checkout', 'POST', { ...body, amountCents: 999 })).status, 400);
-    const created = await request('/recharge/clip/create-checkout', 'POST', body);
+    assert.equal((await request('/recharge/clip/prepare', 'POST', { ...body, amountCents: 999 })).status, 400);
+    const created = await request('/recharge/clip/prepare', 'POST', body);
     assert.equal(created.status, 200); assert.equal(created.data.bonusCents, 250);
-    assert.equal((await request('/recharge/clip/create-checkout', 'POST', body)).data.rechargeId, created.data.rechargeId);
-    assert.equal(createdLinks, 1);
-    assert.equal(checkoutPayload.metadata.customer_info, undefined);
-    assert.equal(checkoutPayload.customer_info, undefined);
-    assert.equal((await request('/recharge/clip/create-checkout', 'POST', { ...body, amountCents: 20000 })).status, 409);
+    assert.equal(created.data.canPay, true); assert.equal(created.data.checkoutUrl, undefined);
+    assert.equal((await request('/recharge/clip/prepare', 'POST', body)).data.rechargeId, created.data.rechargeId);
+    assert.equal((await request('/recharge/clip/prepare', 'POST', { ...body, amountCents: 20000 })).status, 409);
     assert.equal((await request(`/recharge/clip/status/${created.data.rechargeId}`, 'GET', null, 'other')).status, 404);
-    assert.equal((await request('/clip/webhook', 'POST', { id: providerPaymentId, resource_status: 'COMPLETED' })).status, 200);
+    assert.equal((await request(`/clip/transparent/webhook?payment=${created.data.rechargeId}`, 'POST', { id: providerPaymentId })).status, 409);
     assert.equal(f.state().wallet.length, 0);
-    remoteStatus = 'CHECKOUT_COMPLETED';
-    const [verified, callback] = await Promise.all([request(`/recharge/clip/status/${created.data.rechargeId}`), request('/clip/webhook', 'POST', { id: providerPaymentId })]);
-    assert.equal(verified.data.status, 'SUCCEEDED'); assert.equal(callback.status, 200);
+    const paid = await request(`/recharge/clip/pay/${created.data.rechargeId}`, 'POST', {
+      cardToken: providerPaymentId, customer: { email: 'typed@example.test', phone: '+52 55 1111 2222' },
+    });
+    assert.equal(paid.status, 200); assert.equal(paid.data.status, 'SUCCEEDED');
+    assert.equal(chargePayload.customer.email, 'typed@example.test');
+    assert.equal(chargePayload.customer.phone, '525511112222');
+    assert.deepEqual(chargePayload.payment_method, { token: providerPaymentId });
+    assert.equal(chargePayload.card_number, undefined);
+    assert.equal(charges, 1);
     assert.equal(f.state().wallet[0].balanceCents, 10000); assert.equal(f.state().wallet[0].bonusBalanceCents, 250);
   } finally {
     global.fetch = originalFetch; require.cache[dbPath] = oldDb;
+    if (oldApiKey === undefined) delete process.env.CLIP_API_KEY; else process.env.CLIP_API_KEY = oldApiKey;
     if (oldAuth) require.cache[authPath] = oldAuth; else delete require.cache[authPath];
     server.closeAllConnections(); await new Promise((resolve) => server.close(resolve));
   }

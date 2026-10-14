@@ -63,7 +63,7 @@ function paymentCustomer(value) {
   const email = String(value?.email || '').trim();
   const phone = String(value?.phone || '').replace(/\D/g, '');
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254 || phone.length < 10 || phone.length > 15) {
-    throw error('Completa tu correo y teléfono en Perfil antes de pagar.', 400, 'INVALID_CUSTOMER');
+    throw error('Ingresa un correo y teléfono válidos en el formulario de pago.', 400, 'INVALID_CUSTOMER');
   }
   const customer = { email, phone };
   const address = value?.address;
@@ -80,7 +80,9 @@ function paymentCustomer(value) {
 
 async function paymentCustomerFromUser(client, userId, fallback = {}) {
   const user = await client.user.findUnique({ where: { id: userId }, select: { email: true, phone: true } });
-  return paymentCustomer({ ...fallback, email: user?.email || fallback.email, phone: user?.phone || fallback.phone });
+  // Use the contact details explicitly entered in this checkout. The account profile
+  // is only a convenience default when the in-app form did not provide them.
+  return paymentCustomer({ ...fallback, email: fallback.email || user?.email, phone: fallback.phone || user?.phone });
 }
 
 async function chargeTransparentPayment(client, model, payment, cardToken, customerValue, fetcher) {

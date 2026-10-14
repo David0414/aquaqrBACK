@@ -1,13 +1,13 @@
 const express = require('express');
 const { prisma } = require('../db');
 const { requireManagedMachine, requireAdministrator } = require('../utils/managementAccess');
-const { createClipCheckout, UUID, clipAuthorization, clipCheckoutEnvironment } = require('../utils/clip');
+const { UUID } = require('../utils/clip');
 const { premiumQuote, activeMachinePremium, reconcileMachinePremium, PREMIUM_PLANS } = require('../utils/machinePremium');
 const { machineSales } = require('../utils/machineSales');
 const { transparentConfig, chargeTransparentPayment, paymentCustomerFromUser } = require('../utils/clipTransparent');
 const router = express.Router();
 const paymentResponse = (payment) => ({ paymentId: payment.id, amountCents: payment.amountCents, status: payment.status,
-  environment: payment.clipEnvironment, flow: payment.clipFlow, checkoutUrl: payment.checkoutUrl,
+  environment: payment.clipEnvironment, flow: payment.clipFlow,
   canPay: payment.clipFlow === 'TRANSPARENT' && payment.status === 'PENDING' && !payment.providerPaymentId && !payment.clipChargeStartedAt });
 function fail(res, error) {
   return res.status(error.statusCode || 500).json({ error: error.code || 'PREMIUM_UNAVAILABLE',
@@ -41,37 +41,6 @@ router.get('/machines/:id/statistics', requireManagedMachine(), async (req, res)
     res.set('Cache-Control', 'no-store');
     return res.json({ machineId, sales });
   } catch (error) { return fail(res, error); }
-});
-
-router.post('/machines/:id/premium/checkout', requireManagedMachine(), async (req, res) => {
-  let created;
-  try {
-    if (req.management.role !== 'PARTNER') return res.status(400).json({ error: 'El administrador ya tiene acceso a las estadísticas.' });
-    clipAuthorization();
-    const { requestId, expectedPriceCents } = req.body || {};
-    if (!UUID.test(requestId || '')) return res.status(400).json({ error: 'Solicitud de pago inválida' });
-    const machineId = req.managedMachine.id, userId = req.management.userId;
-    const key = `${userId}:${requestId}`;
-    const previous = await prisma.machinePremiumPayment.findUnique({ where: { requestId: key } });
-    if (previous) {
-      if (previous.machineId !== machineId || previous.amountCents !== expectedPriceCents) return res.status(409).json({ error: 'Esta solicitud corresponde a otra compra.' });
-      if (!previous.checkoutUrl) return res.status(409).json({ error: 'El pago se está preparando. Intenta nuevamente.' });
-      return res.json({ paymentId: previous.id, checkoutUrl: previous.checkoutUrl, status: previous.status });
-    }
-    const quote = await premiumQuote(prisma, machineId);
-    if (expectedPriceCents !== quote.amountCents) return res.status(409).json({ error: 'PRICE_CHANGED', message: 'El precio cambió. Revisa el importe antes de pagar.' });
-    created = await prisma.machinePremiumPayment.create({ data: { machineId, userId, requestId: key,
-      amountCents: quote.amountCents, segment: quote.segment, volumeGarrafones: quote.volumeGarrafones,
-      volumeFrom: quote.volumeFrom, volumeTo: quote.volumeTo, clipEnvironment: clipCheckoutEnvironment() } });
-    const checkout = await createClipCheckout({ id: created.id, amountCents: quote.amountCents,
-      description: `Premium mensual de ${machineId} — ${quote.segment}`,
-      returnPath: `/partner-panel?premiumPayment=${encodeURIComponent(created.id)}&machineId=${encodeURIComponent(machineId)}` });
-    await prisma.machinePremiumPayment.update({ where: { id: created.id }, data: checkout });
-    return res.json({ paymentId: created.id, ...checkout });
-  } catch (error) {
-    if (created) await prisma.machinePremiumPayment.updateMany({ where: { id: created.id, status: 'PENDING' }, data: { status: 'FAILED' } }).catch(() => {});
-    return fail(res, error);
-  }
 });
 
 router.post('/machines/:id/premium/prepare', requireManagedMachine(), async (req, res) => {

@@ -1,12 +1,12 @@
 const express = require('express');
 const { prisma } = require('../db');
 const { requireAuth } = require('../utils/auth');
-const { createClipCheckout, clipAuthorization, clipCheckoutEnvironment, UUID } = require('../utils/clip');
+const { UUID } = require('../utils/clip');
 const { reconcileClipRecharge } = require('../utils/clipSettlement');
 const { transparentConfig, chargeTransparentPayment, paymentCustomerFromUser } = require('../utils/clipTransparent');
 const { getPromotionCatalog, getUserPromotionSelectionState, getRechargeBonusOffer } = require('../utils/rewards');
 const router = express.Router();
-const paymentResponse = (payment) => ({ rechargeId: payment.id, checkoutUrl: payment.checkoutUrl,
+const paymentResponse = (payment) => ({ rechargeId: payment.id,
   amountCents: payment.amountCents, bonusCents: payment.bonusCents, status: payment.status,
   flow: payment.clipFlow, environment: payment.clipEnvironment,
   canPay: payment.clipFlow === 'TRANSPARENT' && payment.status === 'PENDING' && !payment.clipChargeStartedAt && !payment.providerPaymentId });
@@ -62,40 +62,6 @@ router.post('/clip/pay/:id', requireAuth, async (req, res) => {
         message: failure.statusCode ? failure.message : 'No se pudo confirmar el pago. Verifica su estado.' });
     }
     return sendError(res, failure);
-  }
-});
-
-router.post('/clip/create-checkout', requireAuth, async (req, res) => {
-  let created;
-  try {
-    clipAuthorization();
-    const { userId } = req.auth;
-    const { amountCents, requestId } = req.body || {};
-    if (!Number.isInteger(amountCents) || amountCents < 1000 || amountCents > 50000 || !UUID.test(requestId || '')) {
-      return res.status(400).json({ error: 'Ingresa un monto entre $10 y $500 y una solicitud válida.' });
-    }
-    const checkoutRequestId = `${userId}:${requestId}`;
-    const previous = await prisma.recharge.findUnique({ where: { checkoutRequestId } });
-    if (previous) {
-      if (previous.amountCents !== amountCents) return res.status(409).json({ error: 'Esta solicitud corresponde a otro monto.' });
-      if (!previous.checkoutUrl) return res.status(409).json({ error: 'El pago todavía se está preparando. Intenta nuevamente.' });
-      return res.json(paymentResponse(previous));
-    }
-    await prisma.user.upsert({ where: { id: userId }, update: {}, create: { id: userId } });
-    const catalog = await getPromotionCatalog(prisma);
-    const selection = await getUserPromotionSelectionState(prisma, userId, new Date(), catalog);
-    const bonus = getRechargeBonusOffer(amountCents, selection.selectedPromotionKeys, catalog);
-    created = await prisma.recharge.create({ data: { userId, provider: 'CLIP', currency: 'MXN', amountCents,
-      checkoutRequestId, clipEnvironment: clipCheckoutEnvironment(), status: 'PENDING',
-      bonusCents: bonus.bonusCents, bonusPromotionKey: bonus.promotionKey, bonusMetadata: bonus.metadata } });
-    const checkout = await createClipCheckout({ id: created.id, amountCents, description: 'Recarga de saldo AGUA/24',
-      returnPath: `/balance-recharge?clipRecharge=${encodeURIComponent(created.id)}` });
-    const payment = await prisma.recharge.update({ where: { id: created.id }, data: checkout });
-    res.set('Cache-Control', 'no-store');
-    return res.json(paymentResponse(payment));
-  } catch (error) {
-    if (created) await prisma.recharge.updateMany({ where: { id: created.id, status: 'PENDING' }, data: { status: 'FAILED' } }).catch(() => {});
-    return sendError(res, error);
   }
 });
 
