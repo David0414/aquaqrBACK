@@ -11,6 +11,16 @@ function clipAuthorization() {
   throw clipError('Los pagos con Clip todavía no están configurados.', 503, 'CLIP_NOT_CONFIGURED');
 }
 
+function clipCheckoutEnvironment() {
+  const apiKey = String(process.env.CLIP_API_KEY || '').trim();
+  if (apiKey) return apiKey.startsWith('test_') ? 'sandbox' : 'production';
+  const token = String(process.env.CLIP_AUTH_TOKEN || '').trim().replace(/^Basic\s+/i, '');
+  try {
+    const basicKey = Buffer.from(token, 'base64').toString('utf8').split(':', 1)[0];
+    return basicKey.startsWith('test_') ? 'sandbox' : 'production';
+  } catch { return 'production'; }
+}
+
 function publicReturnUrl(path) {
   let url;
   try { url = new URL(path, process.env.APP_PUBLIC_URL); } catch { throw clipError('Falta configurar la dirección pública de la app.', 503); }
@@ -70,4 +80,4 @@ function verifiedClipStatus(payment, data) {
   throw clipError('Clip devolvió un estado de pago desconocido.');
 }
 
-module.exports = { createClipCheckout, clipAuthorization, clipRequest, verifiedClipStatus, validCheckoutUrl, UUID };
+module.exports = { createClipCheckout, clipAuthorization, clipCheckoutEnvironment, clipRequest, verifiedClipStatus, validCheckoutUrl, UUID };

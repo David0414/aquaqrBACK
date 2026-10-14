@@ -1,7 +1,7 @@
 const express = require('express');
 const { prisma } = require('../db');
 const { requireAuth } = require('../utils/auth');
-const { createClipCheckout, clipAuthorization, UUID } = require('../utils/clip');
+const { createClipCheckout, clipAuthorization, clipCheckoutEnvironment, UUID } = require('../utils/clip');
 const { reconcileClipRecharge } = require('../utils/clipSettlement');
 const { transparentConfig, chargeTransparentPayment, paymentCustomerFromUser } = require('../utils/clipTransparent');
 const { getPromotionCatalog, getUserPromotionSelectionState, getRechargeBonusOffer } = require('../utils/rewards');
@@ -86,7 +86,8 @@ router.post('/clip/create-checkout', requireAuth, async (req, res) => {
     const selection = await getUserPromotionSelectionState(prisma, userId, new Date(), catalog);
     const bonus = getRechargeBonusOffer(amountCents, selection.selectedPromotionKeys, catalog);
     created = await prisma.recharge.create({ data: { userId, provider: 'CLIP', currency: 'MXN', amountCents,
-      checkoutRequestId, status: 'PENDING', bonusCents: bonus.bonusCents, bonusPromotionKey: bonus.promotionKey, bonusMetadata: bonus.metadata } });
+      checkoutRequestId, clipEnvironment: clipCheckoutEnvironment(), status: 'PENDING',
+      bonusCents: bonus.bonusCents, bonusPromotionKey: bonus.promotionKey, bonusMetadata: bonus.metadata } });
     const checkout = await createClipCheckout({ id: created.id, amountCents, description: 'Recarga de saldo AGUA/24',
       returnPath: `/balance-recharge?clipRecharge=${encodeURIComponent(created.id)}` });
     const payment = await prisma.recharge.update({ where: { id: created.id }, data: checkout });

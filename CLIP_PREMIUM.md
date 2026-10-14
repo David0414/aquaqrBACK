@@ -1,149 +1,81 @@
-# Clip Transparente, pruebas y Premium por máquina
+# Pagos Clip y Premium por máquina
 
-## Publicar esta actualización
+## Flujo actual sin correo ni teléfono en AquaQR
 
-1. Si ya ejecutaste [ACTUALIZAR_CLIP_PREMIUM.sql](ACTUALIZAR_CLIP_PREMIUM.sql),
-   ahora abrir **SQL Editor → New query**, pegar
-   [ACTUALIZAR_CLIP_TRANSPARENTE.sql](ACTUALIZAR_CLIP_TRANSPARENTE.sql) y ejecutar **Run**.
-   Para una instalación nueva, ejecutar primero el SQL Premium y después el SQL
-   Transparente. Requiere las migraciones anteriores de roles, membresías y monedas.
-   Los archivos se pueden ejecutar nuevamente y conservan los pagos anteriores.
-2. En las variables **del backend en Railway**, configurar:
+Las recargas nuevas y las membresías Premium abren el **Checkout Redireccionado de Clip**.
+La app no pide ni envía correo o teléfono para iniciar el pago. Clip recibe al cliente
+en su página segura y la app concilia el resultado antes de acreditar saldo o activar
+Premium. Volver a AquaQR no acredita el pago por sí solo: el backend verifica estado,
+importe y referencia.
 
-   ```env
-   CLIP_API_KEY=test_tu_clave_api_de_pruebas
-   APP_PUBLIC_URL=https://tu-app-publicada
-   API_PUBLIC_URL=https://aquaqrback-production.up.railway.app
-   ```
+En Railway, este flujo requiere las credenciales Basic de Clip:
 
-   Pegar la Clave API completa de **Pruebas**, tal como la entrega Clip; debe
-   empezar con `test_`. No agregar `Basic`, comillas ni inventar una clave.
-   Se obtiene en **Panel de desarrolladores → Credenciales → Crear credencial → Pruebas**.
-   El backend usa `Bearer` automáticamente. Checkout Transparente no necesita
-   `CLIP_SECRET_KEY` ni `CLIP_AUTH_TOKEN`; esas variables sólo se conservan para
-   conciliar enlaces antiguos de Checkout Redireccionado.
-   No hace falta agregar una variable Clip a Vercel: el frontend obtiene del
-   backend autenticado la **Clave API pública requerida por el SDK**. La clave
-   secreta y el token Basic nunca se envían al navegador.
-   Conservar `APP_BASE_URL`, las variables de Supabase/Clerk y los comandos que ya funcionan.
-3. Hacer push y publicar ambos proyectos. El backend debe compilar con
-   `npm run build` (genera Prisma) e iniciar con `npm start`.
-4. Aplicar las variables con **Deploy** en Railway y probar una recarga con una
-   tarjeta oficial de sandbox. La pantalla mostrará **Modo de prueba · sin cargos reales**.
+```env
+CLIP_API_KEY=test_tu_clave_api
+CLIP_SECRET_KEY=tu_clave_secreta
+APP_PUBLIC_URL=https://tu-app-publicada
+API_PUBLIC_URL=https://aquaqrback-production.up.railway.app
+```
 
-## Si aparece «Not Found» donde va la tarjeta
+Usa la API key y la clave secreta del mismo entorno (Pruebas o Producción). Si Clip
+te entregó un token Basic completo, puedes ponerlo en `CLIP_AUTH_TOKEN` en lugar de
+las otras dos variables. Mantén las claves privadas solo en Railway, nunca en Vercel.
+No necesitas configurar Postback Webhooks manualmente; el backend envía la URL al
+crear cada checkout.
 
-El formulario pide su configuración al backend en
-`GET /api/payments/clip/config`. Si esa petición devuelve **404 / Not Found**,
-Railway todavía está ejecutando una versión que no incluye esta ruta.
-Cambiar las claves de Clip o ejecutar SQL no agrega las rutas del backend.
+La página alojada y los campos que Clip muestre ahí los controla Clip. AquaQR omite
+`metadata.customer_info`, que Clip documenta como [opcional](https://developer.clip.mx/reference/introduccion-a-clip-checkout);
+no inventa datos de contacto ni bloquea el inicio del pago por el perfil del usuario.
 
-1. Guardar los cambios, hacer **commit y push del proyecto Backend**, incluyendo
-   los archivos nuevos. Esta actualización necesita tanto
-   `src/routes/clipWebhook.js` como `src/utils/clipTransparent.js` y el resto de
-   los cambios de Checkout Transparente.
-2. En Railway, abrir el servicio **aquaqrBACK → Deployments** y comprobar que
-   el nuevo despliegue corresponde al commit recién enviado y termina correctamente.
-   Si Railway no publica automáticamente, desplegar el último commit de la rama
-   conectada. Volver a desplegar un commit anterior conserva el error.
-3. Publicar también el frontend actualizado en Vercel y recargar la app.
-   Ante un fallo ahora muestra el motivo, detiene «Cargando…» y permite
-   **Reintentar cargar formulario**, sin iniciar otro pago.
+## Publicar la versión actual
 
-Para comprobar que la ruta ya existe, abrir en el navegador
-`https://aquaqrback-production.up.railway.app/api/payments/clip/config`
-sin iniciar sesión. Debe responder **401 (requiere autenticación)**, en vez de
-404. Dentro de la app, con sesión iniciada y la clave Clip configurada, debe
-responder **200**. Un **503** con el mensaje de que falta configurar la Clave API
-se resuelve revisando `CLIP_API_KEY` en las variables del servicio backend y
-aplicando el despliegue.
+Este cambio no requiere ejecutar SQL. Publica los cambios del frontend en Vercel y
+los cambios de Backend en Railway. En Railway configura las credenciales Basic
+que Clip entrega para el mismo entorno:
 
-## Tarjetas y entorno de pruebas
+```env
+CLIP_API_KEY=test_tu_clave_api
+CLIP_SECRET_KEY=tu_clave_secreta
+APP_PUBLIC_URL=https://tu-app-publicada
+API_PUBLIC_URL=https://aquaqrback-production.up.railway.app
+```
 
-La app ahora usa el [SDK de Checkout Transparente](https://developer.clip.mx/reference/configuracion-del-sdk-de-checkout-transparente)
-y la API `POST /payments`, ambos compatibles con el
-[sandbox oficial de Clip](https://developer.clip.mx/reference/pruebas).
+También se puede usar `CLIP_AUTH_TOKEN` si Clip entregó el token Basic completo,
+en lugar de `CLIP_API_KEY` y `CLIP_SECRET_KEY`. Conserva las credenciales privadas
+solo en Railway. Con claves de Pruebas no se cobra dinero real; para cobrar de verdad
+se deben poner las credenciales de Producción del mismo comercio y volver a desplegar.
 
-Datos para un pago aprobado de prueba:
+La app ya no carga el formulario incrustado ni exige correo o teléfono del perfil.
+El botón **Pagar** crea un checkout alojado por Clip y redirige al cliente. AquaQR
+omite `metadata.customer_info` (opcional según Clip); la página alojada y cualquier
+campo adicional que Clip muestre los controla Clip. No agregues datos inventados.
+No hace falta configurar Postback Webhooks manualmente: el backend incluye su
+webhook al crear el checkout, verifica el resultado y acredita la recarga o activa
+Premium una sola vez.
 
-| Campo | Valor |
-| --- | --- |
-| Número de tarjeta | `4555128482797669` (Visa BBVA, México) |
-| Vencimiento | Una fecha futura, por ejemplo `12/30` |
-| CVV | `123` |
-| Nombre | Tu nombre o un nombre de prueba |
+Si después del despliegue todavía aparece el formulario anterior, actualiza el
+frontend en Vercel y el Backend en Railway. No ejecutes SQL para corregirlo.
 
-Para simular fondos insuficientes: `4555126387272952`.
-Ingresar también correo y teléfono de 10 dígitos en la app. Las tarjetas
-American Express necesitan dirección de facturación; usar el apartado desplegable.
-La tarjeta `4242…` de Stripe no sirve para Clip.
+## Entorno de pruebas
 
-El SDK alojado por Clip captura la tarjeta en su iframe y entrega un token de
-un solo uso. Nuestro backend recibe el token, el correo y el teléfono; nunca
-recibe ni guarda el número completo, vencimiento ni CVV.
-
-Sandbox simula el saldo, el bono y Premium **en la base de datos configurada**.
-Usar una base y un despliegue de pruebas para mantener esos saldos separados de
-los clientes reales. Cambiar a una clave de producción no borra saldos simulados.
-Premium registra el entorno y una activación sandbox no habilita estadísticas
-cuando se vuelve a usar producción.
-
-Para cobrar dinero real, reemplazar `CLIP_API_KEY` por la Clave API de
-**Producción**, aplicar **Deploy** y recargar la app. El aviso de pruebas desaparece.
-Clip puede requerir verificar la identidad del negocio para habilitar su SDK.
+Prueba usando credenciales de **Pruebas** y la tarjeta indicada actualmente en el
+panel/documentación de Clip para Checkout Redireccionado. La tarjeta `4242…` de
+Stripe no sirve para Clip. Los pagos de prueba solo actualizan la base de datos
+configurada; usa una base de pruebas si no quieres mezclar saldos con clientes reales.
 
 La migración Premium es `20261012120000_clip_machine_premium_and_benefits`;
-la nueva migración es `20261012180000_clip_transparent_checkout`.
-El nuevo SQL Transparente está preparado para el SQL Editor; no se aplicó a la base publicada.
+la migración Transparente anterior es `20261012180000_clip_transparent_checkout`.
+No se requiere una nueva migración para el flujo redireccionado ni para quitar los
+campos de correo/teléfono de la pantalla AquaQR.
 
 ## Recarga de clientes
 
-El botón muestra **Pagar** en ambos entornos. Con una clave `test_`, el aviso
-**Modo de prueba · sin cargos reales** permanece visible: cambiar el texto del
-botón no convierte las credenciales en productivas.
-
-Un pago `approved` verificado suma el importe a **Saldo depositado** y el bono
-correspondiente a **Saldo de promociones**, una sola vez. Al volver a Inicio se
-presenta inmediatamente el saldo confirmado; una consulta anterior todavía en
-curso no puede reemplazarlo por el saldo viejo. Si el webhook confirma primero,
-la respuesta del pago también devuelve la cartera actualizada.
-
-La aprobación recibida en `POST /payments` se valida y se utiliza en esa misma
-solicitud. Los pagos pendientes se siguen verificando con consultas nuevas a
-Clip y se acreditan al aprobarse. Promociones comparte el último resumen de cada
-usuario, actualiza los datos en segundo plano y consulta precios vigentes antes
-de comprar. El catálogo se inicializa una vez por proceso, conservando la lectura
-de los cambios de precios y promociones del administrador.
-
-Esta corrección no añade columnas ni requiere otro SQL. Publicar los cambios de
-Backend en Railway y del frontend en Vercel, incluyendo los archivos nuevos.
-
-La pantalla 1 permite elegir $50, $100, $200, $500 o un monto de $10 a $500.
-La pantalla 2 presenta el saldo a recibir y el formulario protegido de Clip
-dentro de la app. El backend fija el importe y el bono antes de recibir el token.
-Consulta `GET /payments/{id}` y verifica ID, referencia, importe y moneda.
-Sólo un pago `approved`, sin reembolso ni propina, acredita el saldo.
-Un pago `pending` o `authorized` no agrega saldo ni activa Premium.
-Si el banco exige 3DS, se abre su validación y se consulta de nuevo el estado en
-el backend. También hay un botón para verificar y consultas periódicas mientras
-el pago está pendiente.
-
-El backend envía `webhook_url` al crear el pago, con la ruta
-`POST /api/payments/clip/transparent/webhook?payment=ID_LOCAL`.
-No hace falta activar **Postback Webhooks** en el panel de Clip.
-Toda notificación se verifica consultando a Clip; el estado recibido en su cuerpo
-no autoriza saldo ni Premium. Si llega antes de guardarse el ID remoto, el backend
-lo recupera únicamente cuando la referencia, moneda e importe coinciden.
-La recarga y su bono se acreditan en una transacción una sola vez.
-Un doble clic reutiliza la misma solicitud; una respuesta incierta bloquea el
-intento y permite verificar, sin volver a enviar un cargo. Si no se recibe ni ID
-de pago ni notificación, requiere revisar ese pago en Clip antes de otro intento.
-
-Los enlaces Clip anteriores conservan su consulta `/v2/checkout` y su webhook
-`/api/payments/clip/webhook`; los pagos Stripe ya registrados conservan su
-conciliación. Las credenciales correspondientes siguen siendo necesarias para
-esos pagos pendientes. Los pagos nuevos usan exclusivamente Clip Transparente.
-
+La pantalla de monto conserva los importes de $50, $100, $200, $500 y el monto
+personalizado de $10 a $500. En el paso de pago se muestra el saldo a recibir y un
+solo botón **Pagar**. Tras la aprobación, el backend suma el importe a **Saldo depositado**
+y el bono correspondiente a **Saldo de promociones**, una sola vez.
+Al volver a Inicio se presenta el saldo confirmado. Un pago pendiente no acredita
+saldo hasta que Clip confirme el estado.
 ## Premium de socios
 
 El acceso normal permite controlar y ajustar el desfase de las máquinas asignadas.

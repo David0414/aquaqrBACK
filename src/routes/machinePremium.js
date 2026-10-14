@@ -1,7 +1,7 @@
 const express = require('express');
 const { prisma } = require('../db');
 const { requireManagedMachine, requireAdministrator } = require('../utils/managementAccess');
-const { createClipCheckout, UUID, clipAuthorization } = require('../utils/clip');
+const { createClipCheckout, UUID, clipAuthorization, clipCheckoutEnvironment } = require('../utils/clip');
 const { premiumQuote, activeMachinePremium, reconcileMachinePremium, PREMIUM_PLANS } = require('../utils/machinePremium');
 const { machineSales } = require('../utils/machineSales');
 const { transparentConfig, chargeTransparentPayment, paymentCustomerFromUser } = require('../utils/clipTransparent');
@@ -62,7 +62,7 @@ router.post('/machines/:id/premium/checkout', requireManagedMachine(), async (re
     if (expectedPriceCents !== quote.amountCents) return res.status(409).json({ error: 'PRICE_CHANGED', message: 'El precio cambió. Revisa el importe antes de pagar.' });
     created = await prisma.machinePremiumPayment.create({ data: { machineId, userId, requestId: key,
       amountCents: quote.amountCents, segment: quote.segment, volumeGarrafones: quote.volumeGarrafones,
-      volumeFrom: quote.volumeFrom, volumeTo: quote.volumeTo } });
+      volumeFrom: quote.volumeFrom, volumeTo: quote.volumeTo, clipEnvironment: clipCheckoutEnvironment() } });
     const checkout = await createClipCheckout({ id: created.id, amountCents: quote.amountCents,
       description: `Premium mensual de ${machineId} — ${quote.segment}`,
       returnPath: `/partner-panel?premiumPayment=${encodeURIComponent(created.id)}&machineId=${encodeURIComponent(machineId)}` });
