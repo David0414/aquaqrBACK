@@ -42,6 +42,21 @@ async function activeMachinePremium(client, machineId, now = new Date()) {
     ...(process.env.CLIP_API_KEY ? { OR: [{ clipEnvironment: null }, { clipEnvironment: environment }] } : {}) }, orderBy: { endsAt: 'desc' } });
 }
 
+async function machinePremiumOverview(client, machineIds, now = new Date()) {
+  if (!machineIds.length) return new Map();
+  const environment = process.env.CLIP_API_KEY ? transparentConfig().environment : null;
+  const payments = await client.machinePremiumPayment.findMany({
+    where: { machineId: { in: machineIds }, status: 'SUCCEEDED', endsAt: { gt: now },
+      ...(environment ? { OR: [{ clipEnvironment: null }, { clipEnvironment: environment }] } : {}) },
+    select: { machineId: true, endsAt: true }, orderBy: { endsAt: 'desc' },
+  });
+  const overview = new Map();
+  for (const payment of payments) {
+    if (!overview.has(payment.machineId)) overview.set(payment.machineId, { active: true, endsAt: payment.endsAt });
+  }
+  return overview;
+}
+
 function addCalendarMonth(date) {
   const result = new Date(date);
   const day = result.getUTCDate();
@@ -75,5 +90,5 @@ async function reconcileMachinePremium(client, payment) {
     ? await transparentProof(payment) : await clipRequest('GET', payment.providerPaymentId));
 }
 
-module.exports = { PREMIUM_PLANS, previousMexicoMonth, premiumSegment, premiumQuote, activeMachinePremium,
+module.exports = { PREMIUM_PLANS, previousMexicoMonth, premiumSegment, premiumQuote, activeMachinePremium, machinePremiumOverview,
   addCalendarMonth, settleMachinePremium, reconcileMachinePremium };

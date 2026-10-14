@@ -14,6 +14,14 @@ function fail(res, error) {
     message: error.statusCode ? error.message : 'No se pudo consultar Premium. Intenta nuevamente o contacta al administrador.' });
 }
 
+router.get('/premium/plans', requireAdministrator, async (_req, res) => {
+  try {
+    const items = await prisma.machinePremiumPlan.findMany({ orderBy: { sortOrder: 'asc' } });
+    res.set('Cache-Control', 'no-store');
+    return res.json({ items });
+  } catch (error) { return fail(res, error); }
+});
+
 router.get('/machines/:id/premium', requireManagedMachine(), async (req, res) => {
   try {
     const machineId = req.managedMachine.id;

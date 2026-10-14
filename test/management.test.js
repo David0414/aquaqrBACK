@@ -8,12 +8,50 @@ process.env.MONITOR_ADMIN_PASSWORD = 'fixture-password';
 process.env.QR_SIGNING_SECRET = 'fixture-qr-secret';
 let users = [], machines = [], clerkAccounts = [], adminCredentials = [], credentialError = null, premiumPayments = [], premiumPlans = [];
 const matches = (row, where = {}) => Object.entries(where).every(([key, value]) => {
+  if (key === 'OR') return value.some((branch) => matches(row, branch));
   if (value && typeof value === 'object') {
     if ('not' in value) return row[key] != null && row[key] !== value.not;
     if ('in' in value) return value.in.includes(row[key]);
     if ('gt' in value) return row[key] > value.gt;
   }
   return row[key] === value;
+});
+
+test('machine cards expose current Premium only for machines in the account scope', async () => {
+  premiumPayments.push(
+    { machineId: 'AQ-001', status: 'SUCCEEDED', endsAt: new Date(Date.now() + 86400000), clipEnvironment: null },
+    { machineId: 'AQ-002', status: 'SUCCEEDED', endsAt: new Date(Date.now() + 86400000), clipEnvironment: null },
+    { machineId: 'AQ-003', status: 'SUCCEEDED', endsAt: new Date(Date.now() - 86400000), clipEnvironment: null },
+  );
+  const partner = await request('/monitor/summary', 'partner-1');
+  assert.equal(partner.status, 200);
+  assert.equal(partner.data.machines.length, 1);
+  assert.equal(partner.data.machines[0].premium.active, true);
+  assert.equal(partner.data.counts.premiumActiveMachines, 1);
+  const admin = await request('/monitor/summary', 'admin');
+  assert.equal(admin.data.machines.find((machine) => machine.id === 'AQ-003').premium.active, false);
+  assert.equal(admin.data.counts.premiumActiveMachines, 2);
+  assert.equal(admin.data.machines.find((machine) => machine.id === 'AQ-001').partner.name, 'Socio Uno');
+});
+
+test('only administrators can read the shared Premium price catalog', async () => {
+  assert.equal((await request('/monitor/premium/plans', 'partner-1')).status, 403);
+  assert.equal((await request('/monitor/premium/plans', 'customer')).status, 403);
+  const admin = await request('/monitor/premium/plans', 'admin');
+  assert.equal(admin.status, 200);
+  assert.equal(admin.data.items.length, 7);
+  assert.equal(admin.data.items[0].monthlyPriceCents, 27100);
+});
+
+test('Premium badges do not activate sandbox purchases in the production environment', async () => {
+  const original = process.env.CLIP_API_KEY;
+  try {
+    process.env.CLIP_API_KEY = 'production_fixture_aaaaaaaaaaaaaaaa';
+    premiumPayments.push({ machineId: 'AQ-001', status: 'SUCCEEDED', endsAt: new Date(Date.now() + 86400000), clipEnvironment: 'sandbox' });
+    assert.equal((await request('/monitor/summary', 'partner-1')).data.machines[0].premium.active, false);
+    process.env.CLIP_API_KEY = 'test_aaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    assert.equal((await request('/monitor/summary', 'partner-1')).data.machines[0].premium.active, true);
+  } finally { if (original === undefined) delete process.env.CLIP_API_KEY; else process.env.CLIP_API_KEY = original; }
 });
 const withPartner = (machine) => machine && ({ ...machine, partner: users.find((user) => user.id === machine.partnerId) || null });
 const db = {
@@ -22,6 +60,7 @@ const db = {
     update: async ({ where, data }) => Object.assign(premiumPlans.find((plan) => plan.key === where.key), data),
   },
   machinePremiumPayment: {
+    findMany: async ({ where }) => premiumPayments.filter((payment) => matches(payment, where)).sort((a, b) => b.endsAt - a.endsAt),
     findFirst: async ({ where }) => premiumPayments.find((payment) => matches(payment, where)) || null,
     findUnique: async ({ where }) => premiumPayments.find((payment) => matches(payment, where)) || null,
   },

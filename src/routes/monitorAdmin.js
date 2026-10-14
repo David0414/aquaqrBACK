@@ -8,6 +8,7 @@ const { requireManagement, requireAdministrator, requireManagedMachine, machineS
 const { saveManagedMachine } = require('../utils/machineSettings');
 const { getPromotionCatalog, ensurePromotionCatalog } = require('../utils/rewards');
 const { machineSales } = require('../utils/machineSales');
+const { machinePremiumOverview } = require('../utils/machinePremium');
 
 const router = express.Router();
 
@@ -255,7 +256,10 @@ router.get('/summary', requireManagement, async (req, res) => {
         orderBy: [{ isActive: 'desc' }, { id: 'asc' }] }),
       req.management.role === 'ADMIN' ? getPromotionCatalog(prisma) : Promise.resolve([]),
     ]);
-    const machines = req.management.role === 'ADMIN' ? mergeMachines(dbMachines) : dbMachines;
+    const premium = await machinePremiumOverview(prisma, dbMachines.map((machine) => machine.id));
+    const machines = (req.management.role === 'ADMIN' ? mergeMachines(dbMachines) : dbMachines).map((machine) => ({
+      ...machine, premium: premium.get(machine.id) || { active: false, endsAt: null },
+    }));
     const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
     const sales = req.management.role === 'ADMIN' ? await machineSales(prisma, dbMachines.map((machine) => machine.id), since) : null;
 
@@ -268,6 +272,7 @@ router.get('/summary', requireManagement, async (req, res) => {
       counts: {
         machines: machines.length,
         activeMachines: machines.filter((machine) => machine.isActive).length,
+        premiumActiveMachines: machines.filter((machine) => machine.premium.active).length,
         activePromotions: promotions.filter((promotion) => promotion.isActive).length,
       },
     });
