@@ -68,13 +68,13 @@ Datos para un pago aprobado de prueba:
 
 | Campo | Valor |
 | --- | --- |
-| Número de tarjeta | `4555128482797669` (Visa BBVA, México) |
+| Número de tarjeta | `4208318689081956` (Visa, México; pago aprobado) |
 | Vencimiento | Una fecha futura, por ejemplo `12/30` |
-| CVV | `123` |
+| CVV | Cualquier número, por ejemplo `123` |
 | Nombre | Tu nombre o un nombre de prueba |
 
-Para simular fondos insuficientes: `4555126387272952`.
-Ingresar también correo y teléfono de 10 dígitos en la app. Las tarjetas
+Para simular fondos insuficientes: `4208312218017433`.
+Ingresa también correo válido y teléfono de 10 a 15 dígitos en la app. Las tarjetas
 American Express necesitan dirección de facturación; usar el apartado desplegable.
 La tarjeta `4242…` de Stripe no sirve para Clip.
 
