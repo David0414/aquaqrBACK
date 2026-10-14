@@ -251,7 +251,12 @@ test('calibration and manual hardware operations reject foreign machines and har
   assert.equal((await request('/dispense/config/pulses', 'customer', 'POST', { machineId: 'AQ-001' })).status, 403);
   assert.equal((await request('/dispense/config/pulses', 'partner-1', 'POST', { machineId: 'AQ-002', hardwareId: '02' })).status, 404);
   assert.equal((await request('/dispense/config/pulses', 'partner-1', 'POST', { machineId: 'AQ-001', hardwareId: '02' })).status, 400);
-  assert.equal((await request('/dispense/config/pulses', 'partner-1', 'POST', { machineId: 'AQ-001', hardwareId: '01', pulsesPerLiter: 400 })).status, 200);
+  const savedCalibration = await request('/dispense/config/pulses', 'partner-1', 'POST', { machineId: 'AQ-001', hardwareId: '01', pulsesPerLiter: 430 });
+  assert.equal(savedCalibration.status, 200);
+  assert.equal(machines.find((machine) => machine.id === 'AQ-001').calibrationPulsesPerLiter, 430);
+  const config = await request('/dispense/config?machineId=AQ-001&hardwareId=01', 'partner-1');
+  assert.equal(config.status, 200);
+  assert.equal(config.data.pulsesPerLiter, 430);
   for (const action of ['bomba_on', 'valvula_llenado_on', 'reiniciar_sistema']) {
     assert.equal((await request('/dispense/demo/control', 'customer', 'POST', { machineId: 'AQ-001', action })).status, 403);
     assert.equal((await request('/dispense/demo/control', 'partner-1', 'POST', { machineId: 'AQ-002', action })).status, 404);

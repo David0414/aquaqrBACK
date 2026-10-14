@@ -207,6 +207,7 @@ model Machine {
   location              String?
   address               String?
   hardwareId            String?
+  calibrationPulsesPerLiter Int?
   partnerId             String?
   partner               User? @relation("PartnerMachines", fields: [partnerId], references: [id], onDelete: SetNull)
   pricePerGarrafonCents Int      @default(3500)

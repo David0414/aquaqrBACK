@@ -197,6 +197,11 @@ async function getMachinePricing(machineIdValue, hardwareIdValue) {
     machine = await prisma.machine.findFirst({ where: { hardwareId } }).catch(() => null);
   }
 
+  const machineHardwareId = normalizeHardwareId(machine?.hardwareId || hardwareId);
+  if (machineHardwareId && Number.isInteger(machine?.calibrationPulsesPerLiter) && machine.calibrationPulsesPerLiter > 0) {
+    updatePulsesPerLiterForHardware(machine.calibrationPulsesPerLiter, machineHardwareId);
+  }
+
   const pricePerGarrafonCents = sanitizePricePerGarrafonCents(machine?.pricePerGarrafonCents);
   const pricePerLiterCents = Math.round(pricePerGarrafonCents / GARRAFON_LITERS);
 
@@ -1462,16 +1467,24 @@ router.get('/config', async (req, res) => {
   }
 });
 
-router.post('/config/pulses', requireManagedMachine('body', 'machineId', true), (req, res) => {
+router.post('/config/pulses', requireManagedMachine('body', 'machineId', true), async (req, res) => {
   const hardwareId = normalizeHardwareId(req.managedMachine.hardwareId);
   if (!hardwareId) return res.status(400).json({ error: 'Configura el hardware de la máquina antes de calibrarla' });
-  const pulsesPerLiter = updatePulsesPerLiterForHardware(req.body?.pulsesPerLiter, hardwareId);
-  return res.json({
-    ok: true,
-    pulsesPerLiter,
-    hardwareId,
-    defaultPulsesPerLiter: DEFAULT_PULSES_PER_LITER,
-  });
+  const pulsesPerLiter = Number(req.body?.pulsesPerLiter);
+  if (!Number.isInteger(pulsesPerLiter) || pulsesPerLiter < 1 || pulsesPerLiter > 65535) {
+    return res.status(400).json({ error: 'Ccal debe ser un número entero entre 1 y 65,535 pulsos por litro' });
+  }
+  try {
+    await prisma.machine.update({
+      where: { id: req.managedMachine.id },
+      data: { calibrationPulsesPerLiter: pulsesPerLiter },
+    });
+    updatePulsesPerLiterForHardware(pulsesPerLiter, hardwareId);
+    return res.json({ ok: true, pulsesPerLiter, hardwareId, defaultPulsesPerLiter: DEFAULT_PULSES_PER_LITER });
+  } catch (error) {
+    console.error('POST /api/dispense/config/pulses error', error);
+    return res.status(500).json({ error: 'No se pudo guardar Ccal para esta máquina' });
+  }
 });
 
 /* ----------------------------------------------------------------------------- */
