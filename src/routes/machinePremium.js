@@ -4,7 +4,7 @@ const { requireManagedMachine, requireAdministrator } = require('../utils/manage
 const { createClipCheckout, UUID, clipAuthorization } = require('../utils/clip');
 const { premiumQuote, activeMachinePremium, reconcileMachinePremium, PREMIUM_PLANS } = require('../utils/machinePremium');
 const { machineSales } = require('../utils/machineSales');
-const { transparentConfig, chargeTransparentPayment } = require('../utils/clipTransparent');
+const { transparentConfig, chargeTransparentPayment, paymentCustomerFromUser } = require('../utils/clipTransparent');
 const router = express.Router();
 const paymentResponse = (payment) => ({ paymentId: payment.id, amountCents: payment.amountCents, status: payment.status,
   environment: payment.clipEnvironment, flow: payment.clipFlow, checkoutUrl: payment.checkoutUrl,
@@ -111,7 +111,8 @@ router.post('/machines/:id/premium/payments/:paymentId/pay', requireManagedMachi
       userId: req.management.userId, clipFlow: 'TRANSPARENT' } });
     if (!payment) return res.status(404).json({ error: 'Pago no encontrado' });
     if (payment.status === 'PENDING' && !payment.providerPaymentId && !payment.clipChargeStartedAt) {
-      payment = await chargeTransparentPayment(prisma, 'machinePremiumPayment', payment, req.body?.cardToken, req.body?.customer);
+      const customer = await paymentCustomerFromUser(prisma, req.management.userId, req.body?.customer);
+      payment = await chargeTransparentPayment(prisma, 'machinePremiumPayment', payment, req.body?.cardToken, customer);
     }
     const result = await reconcileMachinePremium(prisma, payment);
     return res.json({ ...paymentResponse(payment), ...result, canPay: false });

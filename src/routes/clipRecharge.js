@@ -3,7 +3,7 @@ const { prisma } = require('../db');
 const { requireAuth } = require('../utils/auth');
 const { createClipCheckout, clipAuthorization, UUID } = require('../utils/clip');
 const { reconcileClipRecharge } = require('../utils/clipSettlement');
-const { transparentConfig, chargeTransparentPayment } = require('../utils/clipTransparent');
+const { transparentConfig, chargeTransparentPayment, paymentCustomerFromUser } = require('../utils/clipTransparent');
 const { getPromotionCatalog, getUserPromotionSelectionState, getRechargeBonusOffer } = require('../utils/rewards');
 const router = express.Router();
 const paymentResponse = (payment) => ({ rechargeId: payment.id, checkoutUrl: payment.checkoutUrl,
@@ -50,7 +50,8 @@ router.post('/clip/pay/:id', requireAuth, async (req, res) => {
     payment = await prisma.recharge.findFirst({ where: { id: req.params.id, userId: req.auth.userId, provider: 'CLIP', clipFlow: 'TRANSPARENT' } });
     if (!payment) return res.status(404).json({ error: 'Recarga no encontrada' });
     if (payment.status === 'PENDING' && !payment.providerPaymentId && !payment.clipChargeStartedAt) {
-      payment = await chargeTransparentPayment(prisma, 'recharge', payment, req.body?.cardToken, req.body?.customer);
+      const customer = await paymentCustomerFromUser(prisma, req.auth.userId, req.body?.customer);
+      payment = await chargeTransparentPayment(prisma, 'recharge', payment, req.body?.cardToken, customer);
     }
     const result = await reconcileClipRecharge(prisma, payment);
     return res.json({ ...paymentResponse(payment), ...result, canPay: false });

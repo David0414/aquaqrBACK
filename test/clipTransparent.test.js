@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { transparentConfig, paymentRequest, chargeTransparentPayment, verifiedTransparentStatus, paymentAction } = require('../src/utils/clipTransparent');
+const { transparentConfig, paymentRequest, chargeTransparentPayment, verifiedTransparentStatus, paymentAction, paymentCustomerFromUser } = require('../src/utils/clipTransparent');
 const { settleClipRecharge, reconcileClipRecharge } = require('../src/utils/clipSettlement');
 const { settleMachinePremium, PREMIUM_PLANS, activeMachinePremium } = require('../src/utils/machinePremium');
 const { DEFAULT_PROMOTIONS, monthKey } = require('../src/utils/rewards');
@@ -21,7 +21,9 @@ const response = (data, status = 200) => ({ ok: status < 400, status, json: asyn
 
 function database() {
   let rows = { recharge: [], machinePremiumPayment: [], wallet: [], ledgerEntry: [], rewardCredit: [],
-    user: [{ id: 'customer', role: 'CUSTOMER' }, { id: 'partner', role: 'PARTNER' }, { id: 'other', role: 'PARTNER' }],
+    user: [{ id: 'customer', role: 'CUSTOMER', email: 'customer@example.test', phone: '5555555555' },
+      { id: 'partner', role: 'PARTNER', email: 'partner@example.test', phone: '5555555556' },
+      { id: 'other', role: 'PARTNER', email: 'other@example.test', phone: '5555555557' }],
     machine: [{ id: 'AQ-001', partnerId: 'partner' }, { id: 'AQ-002', partnerId: 'other' }] };
   const matches = (row, where = {}) => Object.entries(where).every(([key, value]) => {
     if (key === 'OR') return value.some((item) => matches(row, item));
@@ -84,6 +86,16 @@ test('simultaneous card submissions charge once with the server invoice, referen
   await Promise.all(Array.from({ length: 8 }, () => chargeTransparentPayment(f.db, 'recharge', structuredClone(payment), token, customer, fetcher)));
   assert.equal(charges, 1); assert.equal(f.rows().recharge[0].providerPaymentId, providerId);
   assert.equal(f.rows().wallet.length, 0);
+});
+
+test('payment contact details come from the saved account profile without checkout fields', async () => {
+  const db = { user: { findUnique: async ({ where, select }) => {
+    assert.deepEqual(where, { id: 'customer' }); assert.deepEqual(select, { email: true, phone: true });
+    return { email: 'buyer@example.test', phone: '+52 55 5555 5555' };
+  } } };
+  assert.deepEqual(await paymentCustomerFromUser(db, 'customer'), { email: 'buyer@example.test', phone: '525555555555' });
+  await assert.rejects(paymentCustomerFromUser({ user: { findUnique: async () => ({}) } }, 'customer'), { code: 'INVALID_CUSTOMER' });
+  assert.deepEqual(await paymentCustomerFromUser({ user: { findUnique: async () => ({}) } }, 'customer', customer), customer);
 });
 
 test('an uncertain network result locks the attempt and a retry never sends another charge', async () => {
@@ -178,6 +190,9 @@ test('real HTTP routes enforce ownership, process sandbox payments and verify we
     assert.ok(String(url).startsWith('https://api.payclip.com/payments'));
     if (options.method === 'POST') {
       charges++; const body = JSON.parse(options.body);
+      const payment = [...f.rows().recharge, ...f.rows().machinePremiumPayment].find((row) => row.id === body.external_reference);
+      const profile = f.rows().user.find((user) => user.id === payment.userId);
+      assert.deepEqual(body.customer, { email: profile.email, phone: profile.phone });
       const id = charges === 1 ? providerId : token;
       const value = { id, external_reference: body.external_reference, amount: body.amount, currency: 'MXN', status: 'approved' };
       remote.set(id, value); return response(value);
